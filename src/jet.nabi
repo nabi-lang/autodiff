@@ -1,0 +1,360 @@
+//! Taylor mode: a `Jet` holds the Taylor coefficients c_0 .. c_K of a
+//! function of one variable at a point, and every operation applies the
+//! standard recurrences on truncated power series (Griewank and Walther,
+//! "Evaluating Derivatives", ch. 13), O(K^2) each. The k-th derivative is
+//! k! c_k, exact to rounding, for any order K.
+
+use core::array::{Array, Vector};
+
+/// A truncated Taylor series `c[0] + c[1] t + .. + c[K] t^K`. Arithmetic
+/// with another `Jet` (the lower order of the two wins) or an `f64` on
+/// either side (an order-0 jet acts as a constant), `**` with an `i32` or `f64` exponent, prefix `√`,
+/// comparisons by value and the elementary functions as methods.
+///
+/// ```nabi
+/// use autodiff::Jet;
+///
+/// let x = Jet::var(0.0, 4);
+/// let d = x.sin().derivatives();          // sin, cos, -sin, -cos, sin at 0
+/// assert(d.to_list() == [0.0, 1.0, 0.0, -1.0, 0.0]);
+/// ```
+#[derive(Clone)]
+pub struct Jet {
+    c: List<f64>;
+}
+
+impl Jet {
+    /// The variable `x + t` up to order `k`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Jet::var(2.0, 3).coefficients() == [2.0, 1.0, 0.0, 0.0]);
+    /// ```
+    pub fn var(x: f64, k: usize) -> Jet {
+        let c = List::filled(k + 1, 0.0);
+        c[0] = x;
+        if k > 0 { c[1] = 1.0; }
+        Jet { c }
+    }
+
+    /// The constant `x` up to order `k`.
+    pub fn constant(x: f64, k: usize) -> Jet {
+        let c = List::filled(k + 1, 0.0);
+        c[0] = x;
+        Jet { c }
+    }
+
+    /// The value, `c[0]`.
+    pub fn value(self) -> f64 { self.c[0] }
+
+    /// The order `K`.
+    pub fn order(self) -> usize { self.c.len() - 1 }
+
+    /// The Taylor coefficients `c[0] .. c[K]`.
+    pub fn coefficients(self) -> List<f64> { self.c.clone() }
+
+    /// The derivatives `f(x), f'(x), .., f^(K)(x)`: `k! c[k]`.
+    ///
+    /// ```nabi
+    /// let x = autodiff::Jet::var(1.0, 3);
+    /// assert((x * x * x).derivatives().to_list() == [1.0, 3.0, 6.0, 6.0]);
+    /// ```
+    pub fn derivatives(self) -> Vector<f64> {
+        let n = self.c.len();
+        let out: Vector<f64> = Array::zeros([n]);
+        let f = 1.0;
+        for k in 0..n {
+            if k > 0 { f *= k as f64; }
+            out[k] = self.c[k] * f;
+        }
+        out
+    }
+
+    /// The `k`-th derivative, 0 above the order.
+    pub fn derivative(self, k: usize) -> f64 {
+        if k >= self.c.len() { return 0.0; }
+        let f = 1.0;
+        for i in 1..k + 1 { f *= i as f64; }
+        self.c[k] * f
+    }
+
+    fn n(self, o: Jet) -> usize { self.c.len().min(o.c.len()) }
+
+    fn map(self, g: fn(f64) -> f64) -> Jet { Jet { c: List::from_fn(self.c.len(), |i| g(self.c[i])) } }
+
+    // `h(u)` from `h(u0)` and the series `g` of `h'(u)`: h' = g u', so
+    // k h_k = sum_{j=1..k} j u_j g_{k-j}.
+    fn integrate(self, h0: f64, g: Jet) -> Jet {
+        let n = self.c.len().min(g.c.len());
+        let h = List::filled(n, 0.0);
+        h[0] = h0;
+        for k in 1..n {
+            let s = 0.0;
+            for j in 1..k + 1 { s += (j as f64) * self.c[j] * g.c[k - j]; }
+            h[k] = s / (k as f64);
+        }
+        Jet { c: h }
+    }
+
+    /// `e^x`.
+    pub fn exp(self) -> Jet {
+        let n = self.c.len();
+        let e = List::filled(n, 0.0);
+        e[0] = self.c[0].exp();
+        for k in 1..n {
+            let s = 0.0;
+            for j in 1..k + 1 { s += (j as f64) * self.c[j] * e[k - j]; }
+            e[k] = s / (k as f64);
+        }
+        Jet { c: e }
+    }
+
+    /// The natural logarithm.
+    pub fn ln(self) -> Jet {
+        let n = self.c.len();
+        let l = List::filled(n, 0.0);
+        let u0 = self.c[0];
+        l[0] = u0.ln();
+        for k in 1..n {
+            let s = 0.0;
+            for j in 1..k { s += (j as f64) * l[j] * self.c[k - j]; }
+            l[k] = (self.c[k] - s / (k as f64)) / u0;
+        }
+        Jet { c: l }
+    }
+
+    /// The square root.
+    pub fn sqrt(self) -> Jet {
+        let n = self.c.len();
+        let r = List::filled(n, 0.0);
+        r[0] = self.c[0].sqrt();
+        for k in 1..n {
+            let s = 0.0;
+            for j in 1..k { s += r[j] * r[k - j]; }
+            r[k] = (self.c[k] - s) / (2.0 * r[0]);
+        }
+        Jet { c: r }
+    }
+
+    // sin and cos (or sinh and cosh with `hyp`) together: each one's
+    // derivative is the other.
+    fn sincos(self, hyp: bool) -> (Jet, Jet) {
+        let n = self.c.len();
+        let s = List::filled(n, 0.0);
+        let c = List::filled(n, 0.0);
+        let u0 = self.c[0];
+        s[0] = if hyp { u0.sinh() } else { u0.sin() };
+        c[0] = if hyp { u0.cosh() } else { u0.cos() };
+        let sg = if hyp { 1.0 } else { -1.0 };
+        for k in 1..n {
+            let (a, b) = (0.0, 0.0);
+            for j in 1..k + 1 {
+                let w = (j as f64) * self.c[j];
+                a += w * c[k - j];
+                b += w * s[k - j];
+            }
+            s[k] = a / (k as f64);
+            c[k] = sg * b / (k as f64);
+        }
+        (Jet { c: s }, Jet { c })
+    }
+
+    /// The sine.
+    pub fn sin(self) -> Jet { self.sincos(false).0 }
+
+    /// The cosine.
+    pub fn cos(self) -> Jet { self.sincos(false).1 }
+
+    /// The tangent.
+    pub fn tan(self) -> Jet {
+        let (s, c) = self.sincos(false);
+        s / c
+    }
+
+    /// The hyperbolic sine.
+    pub fn sinh(self) -> Jet { self.sincos(true).0 }
+
+    /// The hyperbolic cosine.
+    pub fn cosh(self) -> Jet { self.sincos(true).1 }
+
+    /// The hyperbolic tangent.
+    pub fn tanh(self) -> Jet {
+        let (s, c) = self.sincos(true);
+        s / c
+    }
+
+    /// The arctangent.
+    pub fn atan(self) -> Jet { self.integrate(self.c[0].atan(), 1.0 / (self.clone() * self.clone() + 1.0)) }
+
+    /// The arcsine.
+    pub fn asin(self) -> Jet { self.integrate(self.c[0].asin(), (1.0 - self.clone() * self.clone()).powf(-0.5)) }
+
+    /// The arccosine.
+    pub fn acos(self) -> Jet { self.integrate(self.c[0].acos(), -(1.0 - self.clone() * self.clone()).powf(-0.5)) }
+
+    /// `|x|`, by the sign of the value; at 0 the zero series.
+    pub fn abs(self) -> Jet {
+        if self.c[0] > 0.0 { self } else if self.c[0] < 0.0 { -self } else { Jet::constant(0.0, self.order()) }
+    }
+
+    /// `x^p` for a real `p`; needs `x != 0` unless `p` is a whole
+    /// number.
+    pub fn powf(self, p: f64) -> Jet {
+        if p == p.round() && p.abs() < 1024.0 { return self.powi(p as i32); }
+        let n = self.c.len();
+        let r = List::filled(n, 0.0);
+        let u0 = self.c[0];
+        r[0] = u0.pow(p);
+        for k in 1..n {
+            let s = 0.0;
+            for j in 1..k + 1 { s += (p * (j as f64) - ((k - j) as f64)) * self.c[j] * r[k - j]; }
+            r[k] = s / ((k as f64) * u0);
+        }
+        Jet { c: r }
+    }
+
+    /// `x^n` for an integer `n`, by squaring.
+    pub fn powi(self, n: i32) -> Jet {
+        let base = if n < 0 { 1.0 / self } else { self };
+        let e = if n < 0 { -(n as i64) } else { n as i64 };
+        let out = Jet::constant(1.0, base.order());
+        while e > 0 {
+            if e % 2 == 1 { out = out * base.clone(); }
+            e /= 2;
+            if e > 0 { base = base.clone() * base.clone(); }
+        }
+        out
+    }
+
+    /// Whether the value is finite.
+    pub fn is_finite(self) -> bool { self.c[0].is_finite() }
+}
+
+impl Debug for Jet {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"Jet({self.c:?})") }
+}
+
+impl PartialEq for Jet {
+    fn eq(self, o: Jet) -> bool { self.c[0] == o.c[0] }
+    fn ne(self, o: Jet) -> bool { self.c[0] != o.c[0] }
+}
+
+impl PartialOrd for Jet {
+    fn lt(self, o: Jet) -> bool { self.c[0] < o.c[0] }
+    fn le(self, o: Jet) -> bool { self.c[0] <= o.c[0] }
+    fn gt(self, o: Jet) -> bool { self.c[0] > o.c[0] }
+    fn ge(self, o: Jet) -> bool { self.c[0] >= o.c[0] }
+}
+
+impl ops::Add for Jet {
+    type Output = Jet;
+    fn add(self, o: Jet) -> Jet {
+        if o.c.len() == 1 { return self + o.c[0]; }
+        if self.c.len() == 1 { return o + self.c[0]; }
+        Jet { c: List::from_fn(self.n(o), |i| self.c[i] + o.c[i]) }
+    }
+}
+
+impl ops::Sub for Jet {
+    type Output = Jet;
+    fn sub(self, o: Jet) -> Jet {
+        if o.c.len() == 1 { return self - o.c[0]; }
+        if self.c.len() == 1 { return self.c[0] - o; }
+        Jet { c: List::from_fn(self.n(o), |i| self.c[i] - o.c[i]) }
+    }
+}
+
+impl ops::Mul for Jet {
+    type Output = Jet;
+    fn mul(self, o: Jet) -> Jet {
+        if o.c.len() == 1 { return self * o.c[0]; }
+        if self.c.len() == 1 { return o * self.c[0]; }
+        let n = self.n(o);
+        let r = List::filled(n, 0.0);
+        for k in 0..n {
+            let s = 0.0;
+            for j in 0..k + 1 { s += self.c[j] * o.c[k - j]; }
+            r[k] = s;
+        }
+        Jet { c: r }
+    }
+}
+
+impl ops::Div for Jet {
+    type Output = Jet;
+    fn div(self, o: Jet) -> Jet {
+        if o.c.len() == 1 { return self / o.c[0]; }
+        if self.c.len() == 1 { return self.c[0] / o; }
+        let n = self.n(o);
+        let q = List::filled(n, 0.0);
+        for k in 0..n {
+            let s = self.c[k];
+            for j in 1..k + 1 { s -= o.c[j] * q[k - j]; }
+            q[k] = s / o.c[0];
+        }
+        Jet { c: q }
+    }
+}
+
+impl ops::Neg for Jet {
+    type Output = Jet;
+    fn neg(self) -> Jet { self.map(|x: f64| -> f64 { -x }) }
+}
+
+impl ops::Add<f64> for Jet {
+    type Output = Jet;
+    fn add(self, o: f64) -> Jet {
+        let c = self.c.clone();
+        c[0] += o;
+        Jet { c }
+    }
+}
+
+impl ops::Sub<f64> for Jet {
+    type Output = Jet;
+    fn sub(self, o: f64) -> Jet { self + -o }
+}
+
+impl ops::Mul<f64> for Jet {
+    type Output = Jet;
+    fn mul(self, o: f64) -> Jet { self.map(|x: f64| -> f64 { x * o }) }
+}
+
+impl ops::Div<f64> for Jet {
+    type Output = Jet;
+    fn div(self, o: f64) -> Jet { self.map(|x: f64| -> f64 { x / o }) }
+}
+
+impl ops::Add<Jet> for f64 {
+    type Output = Jet;
+    fn add(self, o: Jet) -> Jet { o + self }
+}
+
+impl ops::Sub<Jet> for f64 {
+    type Output = Jet;
+    fn sub(self, o: Jet) -> Jet { -o + self }
+}
+
+impl ops::Mul<Jet> for f64 {
+    type Output = Jet;
+    fn mul(self, o: Jet) -> Jet { o * self }
+}
+
+impl ops::Div<Jet> for f64 {
+    type Output = Jet;
+    fn div(self, o: Jet) -> Jet { Jet::constant(self, o.order()) / o }
+}
+
+impl ops::Pow<i32> for Jet {
+    type Output = Jet;
+    fn pow(self, n: i32) -> Jet { self.powi(n) }
+}
+
+impl ops::Pow<f64> for Jet {
+    type Output = Jet;
+    fn pow(self, p: f64) -> Jet { self.powf(p) }
+}
+
+impl ops::Sqrt for Jet {
+    type Output = Jet;
+    fn sqrt(self) -> Jet { Jet::sqrt(self) }
+}

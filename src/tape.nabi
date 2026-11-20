@@ -1,0 +1,482 @@
+//! Reverse mode: every operation on a `Var` appends one node (its at
+//! most two inputs and the partial derivatives toward them) to the
+//! `Tape` it came from, a Wengert list. One backward sweep over the
+//! tape gives the derivative of one output toward every input, so the
+//! gradient of f: R^n -> R costs a small multiple of one evaluation
+//! whatever n is.
+
+use core::array::{Array, Vector};
+
+// The input index of a constant: it has no node.
+const NONE: usize = usize::MAX;
+
+// One operation: `v = g(x_a, x_b)` with `da = dg/dx_a`, `db = dg/dx_b`.
+// An input points at itself with zero partials.
+#[derive(Clone, Copy)]
+struct Node {
+    a: usize;
+    b: usize;
+    da: f64;
+    db: f64;
+}
+
+/// A tape to record operations on: make the inputs with `var`, compute
+/// with them, then call `backward` on the result.
+///
+/// ```nabi
+/// use autodiff::Tape;
+///
+/// let t = Tape::new();
+/// let x = t.var(2.0);
+/// let y = t.var(3.0);
+/// let z = x * y + x.sin();
+/// let d = z.backward();
+/// assert(d.wrt(x) == 3.0 + 2.0f64.cos() && d.wrt(y) == 2.0);
+/// ```
+pub struct Tape {
+    n: List<Node>;
+}
+
+impl Tape {
+    /// An empty tape.
+    pub fn new() -> Tape { Tape { n: List::new() } }
+
+    /// A new input with value `x`.
+    pub fn var(self, x: f64) -> Var {
+        let i = self.n.len();
+        self.n.push(Node { a: i, b: i, da: 0.0, db: 0.0 });
+        Var { t: self.n, i, v: x }
+    }
+
+    /// The inputs `x[0]`, `x[1]`, ... in order.
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let x = t.vars([1.0, 2.0]);
+    /// assert(x.len() == 2 && x[1].value() == 2.0);
+    /// ```
+    pub fn vars(self, x: Vector<f64>) -> Vector<Var> {
+        let n = x.len();
+        let out: List<Var> = List::with_capacity(n);
+        for i in 0..n { out.push(self.var(x[i])); }
+        Array::view_list(out, [n])
+    }
+
+    /// The number of nodes recorded.
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let x = t.var(1.0);
+    /// let _ = x * x;
+    /// assert(t.len() == 2);
+    /// ```
+    pub fn len(self) -> usize { self.n.len() }
+
+    /// Whether nothing is recorded.
+    pub fn is_empty(self) -> bool { self.n.len() == 0 }
+}
+
+/// A number recorded on a `Tape`. Arithmetic with another `Var` or an
+/// `f64` on either side, `**` with an `i32`, `f64` or `Var` exponent,
+/// prefix `√`, comparisons by value and the elementary functions as
+/// methods, as `Dual` has. Every `Var` of one computation must come from
+/// one tape; constants (`Var::constant`) belong to none.
+pub struct Var {
+    t: List<Node>;
+    i: usize;
+    v: f64;
+}
+
+/// The derivatives of one output toward everything on its tape, from
+/// `Var::backward`.
+pub struct Adjoints {
+    d: List<f64>;
+}
+
+impl Adjoints {
+    /// `d out / d x`; 0 for a constant or a `Var` the output does not
+    /// depend on.
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let (x, y) = (t.var(1.0), t.var(5.0));
+    /// let d = (x * 4.0).backward();
+    /// assert(d.wrt(x) == 4.0 && d.wrt(y) == 0.0);
+    /// ```
+    pub fn wrt(self, x: Var) -> f64 { if x.i < self.d.len() { self.d[x.i] } else { 0.0 } }
+
+    /// `d out / d x[i]` for each input.
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let x = t.vars([1.0, 2.0]);
+    /// let g = (x[0] * x[1]).backward().wrt_all(x);
+    /// assert(g[0] == 2.0 && g[1] == 1.0);
+    /// ```
+    pub fn wrt_all(self, x: Vector<Var>) -> Vector<f64> {
+        let n = x.len();
+        let g: Vector<f64> = Array::zeros([n]);
+        for k in 0..n { g[k] = self.wrt(x[k]); }
+        g
+    }
+}
+
+impl Var {
+    /// A constant: no tape, derivative 0.
+    ///
+    /// ```nabi
+    /// let c = autodiff::Var::constant(2.0);
+    /// assert(c.value() == 2.0);
+    /// ```
+    pub fn constant(x: f64) -> Var { Var { t: List::new(), i: NONE, v: x } }
+
+    /// The value.
+    pub fn value(self) -> f64 { self.v }
+
+    /// The derivatives of `self` toward every `Var` of its tape: one
+    /// sweep from `self` back to the inputs, O(tape length).
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let x = t.var(3.0);
+    /// assert((x * x * x).backward().wrt(x) == 27.0);
+    /// ```
+    pub fn backward(self) -> Adjoints {
+        if self.i == NONE { return Adjoints { d: List::new() }; }
+        let n = self.i + 1;
+        let d = List::filled(n, 0.0);
+        d[self.i] = 1.0;
+        let t = self.t;
+        let k = n;
+        while k > 0 {
+            k -= 1;
+            let w = d[k];
+            if w != 0.0 {
+                let e = t[k];
+                d[e.a] += e.da * w;
+                d[e.b] += e.db * w;
+            }
+        }
+        Adjoints { d }
+    }
+
+    // `g(self)` with value `v` and `dg/dx = d`.
+    fn un(self, v: f64, d: f64) -> Var {
+        if self.i == NONE { return Var { t: self.t, i: NONE, v }; }
+        let j = self.t.len();
+        self.t.push(Node { a: self.i, b: self.i, da: d, db: 0.0 });
+        Var { t: self.t, i: j, v }
+    }
+
+    // `g(x, y)` with value `v` and partials `dx`, `dy`.
+    fn bin(x: Var, y: Var, v: f64, dx: f64, dy: f64) -> Var {
+        if x.i == NONE { return y.un(v, dy); }
+        if y.i == NONE { return x.un(v, dx); }
+        let j = x.t.len();
+        x.t.push(Node { a: x.i, b: y.i, da: dx, db: dy });
+        Var { t: x.t, i: j, v }
+    }
+
+    /// The square root.
+    pub fn sqrt(self) -> Var {
+        let s = self.v.sqrt();
+        self.un(s, 0.5 / s)
+    }
+
+    /// The cube root.
+    pub fn cbrt(self) -> Var {
+        let c = self.v.cbrt();
+        self.un(c, 1.0 / (3.0 * c * c))
+    }
+
+    /// `e^x`.
+    ///
+    /// ```nabi
+    /// let t = autodiff::Tape::new();
+    /// let x = t.var(0.0);
+    /// assert(x.exp().backward().wrt(x) == 1.0);
+    /// ```
+    pub fn exp(self) -> Var {
+        let e = self.v.exp();
+        self.un(e, e)
+    }
+
+    /// `e^x - 1`, accurate near 0.
+    pub fn exp_m1(self) -> Var { self.un(self.v.exp_m1(), self.v.exp()) }
+
+    /// `2^x`.
+    pub fn exp2(self) -> Var {
+        let e = self.v.exp2();
+        self.un(e, e * 0.6931471805599453)
+    }
+
+    /// The natural logarithm.
+    pub fn ln(self) -> Var { self.un(self.v.ln(), 1.0 / self.v) }
+
+    /// `ln(1 + x)`, accurate near 0.
+    pub fn ln_1p(self) -> Var { self.un(self.v.ln_1p(), 1.0 / (1.0 + self.v)) }
+
+    /// `log2 x`.
+    pub fn log2(self) -> Var { self.un(self.v.log2(), 1.0 / (self.v * 0.6931471805599453)) }
+
+    /// `log10 x`.
+    pub fn log10(self) -> Var { self.un(self.v.log10(), 1.0 / (self.v * 2.302585092994046)) }
+
+    /// The sine.
+    pub fn sin(self) -> Var { self.un(self.v.sin(), self.v.cos()) }
+
+    /// The cosine.
+    pub fn cos(self) -> Var { self.un(self.v.cos(), -self.v.sin()) }
+
+    /// The tangent.
+    pub fn tan(self) -> Var {
+        let t = self.v.tan();
+        self.un(t, 1.0 + t * t)
+    }
+
+    /// The arcsine.
+    pub fn asin(self) -> Var { self.un(self.v.asin(), 1.0 / (1.0 - self.v * self.v).sqrt()) }
+
+    /// The arccosine.
+    pub fn acos(self) -> Var { self.un(self.v.acos(), -1.0 / (1.0 - self.v * self.v).sqrt()) }
+
+    /// The arctangent.
+    pub fn atan(self) -> Var { self.un(self.v.atan(), 1.0 / (1.0 + self.v * self.v)) }
+
+    /// `atan2(self, x)`, the angle of the point `(x, self)`.
+    pub fn atan2(self, x: Var) -> Var {
+        let r2 = x.v * x.v + self.v * self.v;
+        Var::bin(self, x, self.v.atan2(x.v), x.v / r2, -self.v / r2)
+    }
+
+    /// The hyperbolic sine.
+    pub fn sinh(self) -> Var { self.un(self.v.sinh(), self.v.cosh()) }
+
+    /// The hyperbolic cosine.
+    pub fn cosh(self) -> Var { self.un(self.v.cosh(), self.v.sinh()) }
+
+    /// The hyperbolic tangent.
+    pub fn tanh(self) -> Var {
+        let t = self.v.tanh();
+        self.un(t, 1.0 - t * t)
+    }
+
+    /// The inverse hyperbolic sine.
+    pub fn asinh(self) -> Var { self.un(self.v.asinh(), 1.0 / (self.v * self.v + 1.0).sqrt()) }
+
+    /// The inverse hyperbolic cosine (`x >= 1`).
+    pub fn acosh(self) -> Var { self.un(self.v.acosh(), 1.0 / ((self.v - 1.0).sqrt() * (self.v + 1.0).sqrt())) }
+
+    /// The inverse hyperbolic tangent (`|x| < 1`).
+    pub fn atanh(self) -> Var { self.un(self.v.atanh(), 1.0 / (1.0 - self.v * self.v)) }
+
+    /// `1 / (1 + e^-x)`.
+    pub fn sigmoid(self) -> Var {
+        let s = if self.v >= 0.0 { 1.0 / (1.0 + (-self.v).exp()) } else {
+            let e = self.v.exp();
+            e / (1.0 + e)
+        };
+        self.un(s, s * (1.0 - s))
+    }
+
+    /// `1 / x`.
+    pub fn recip(self) -> Var {
+        let r = 1.0 / self.v;
+        self.un(r, -r * r)
+    }
+
+    /// `|x|`; at 0 the derivative taken is 0.
+    pub fn abs(self) -> Var { self.un(self.v.abs(), if self.v > 0.0 { 1.0 } else if self.v < 0.0 { -1.0 } else { 0.0 }) }
+
+    /// `x^n` for an integer `n`.
+    pub fn powi(self, n: i32) -> Var {
+        if n == 0 { return Var { t: self.t, i: NONE, v: 1.0 }; }
+        self.un(self.v.powi(n), (n as f64) * self.v.powi(n - 1))
+    }
+
+    /// `x^p` for a real `p`.
+    pub fn powf(self, p: f64) -> Var {
+        if p == 0.0 { return Var { t: self.t, i: NONE, v: 1.0 }; }
+        self.un(self.v.pow(p), p * self.v.pow(p - 1.0))
+    }
+
+    /// `x^y`, `exp(y ln x)`; needs `x > 0` unless `y` is a constant.
+    pub fn pow(self, y: Var) -> Var {
+        if y.i == NONE { return self.powf(y.v); }
+        let v = self.v.pow(y.v);
+        let dx = if self.i == NONE { 0.0 } else { y.v * self.v.pow(y.v - 1.0) };
+        Var::bin(self, y, v, dx, v * self.v.ln())
+    }
+
+    /// `sqrt(x^2 + y^2)` without overflow.
+    pub fn hypot(self, y: Var) -> Var {
+        let h = self.v.hypot(y.v);
+        if h == 0.0 { return Var::bin(self, y, 0.0, 0.0, 0.0); }
+        Var::bin(self, y, h, self.v / h, y.v / h)
+    }
+
+    /// The larger by value (`self` on a tie).
+    pub fn max(self, o: Var) -> Var { if o.v > self.v { o } else { self } }
+
+    /// The smaller by value (`self` on a tie).
+    pub fn min(self, o: Var) -> Var { if o.v < self.v { o } else { self } }
+
+    /// Whether the value is finite.
+    pub fn is_finite(self) -> bool { self.v.is_finite() }
+}
+
+// A clone shares the tape: a `Var` is a position on it, not a copy.
+impl Clone for Var {
+    fn clone(self) -> Var { Var { t: self.t, i: self.i, v: self.v } }
+}
+
+impl Clone for Tape {
+    fn clone(self) -> Tape { Tape { n: self.n } }
+}
+
+impl Display for Var {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.v}") }
+}
+
+impl Debug for Var {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"Var({self.v})") }
+}
+
+impl PartialEq for Var {
+    fn eq(self, o: Var) -> bool { self.v == o.v }
+    fn ne(self, o: Var) -> bool { self.v != o.v }
+}
+
+impl PartialOrd for Var {
+    fn lt(self, o: Var) -> bool { self.v < o.v }
+    fn le(self, o: Var) -> bool { self.v <= o.v }
+    fn gt(self, o: Var) -> bool { self.v > o.v }
+    fn ge(self, o: Var) -> bool { self.v >= o.v }
+}
+
+impl Default for Var {
+    fn default() -> Var { Var::constant(0.0) }
+}
+
+impl num::Zero for Var {
+    fn zero() -> Var { Var::constant(0.0) }
+}
+
+impl num::One for Var {
+    fn one() -> Var { Var::constant(1.0) }
+}
+
+impl ops::Add for Var {
+    type Output = Var;
+    fn add(self, o: Var) -> Var { Var::bin(self, o, self.v + o.v, 1.0, 1.0) }
+}
+
+impl ops::Sub for Var {
+    type Output = Var;
+    fn sub(self, o: Var) -> Var { Var::bin(self, o, self.v - o.v, 1.0, -1.0) }
+}
+
+impl ops::Mul for Var {
+    type Output = Var;
+    fn mul(self, o: Var) -> Var { Var::bin(self, o, self.v * o.v, o.v, self.v) }
+}
+
+impl ops::Div for Var {
+    type Output = Var;
+    fn div(self, o: Var) -> Var {
+        let q = self.v / o.v;
+        Var::bin(self, o, q, 1.0 / o.v, -q / o.v)
+    }
+}
+
+impl ops::Neg for Var {
+    type Output = Var;
+    fn neg(self) -> Var { self.un(-self.v, -1.0) }
+}
+
+impl ops::Add<f64> for Var {
+    type Output = Var;
+    fn add(self, o: f64) -> Var { self.un(self.v + o, 1.0) }
+}
+
+impl ops::Sub<f64> for Var {
+    type Output = Var;
+    fn sub(self, o: f64) -> Var { self.un(self.v - o, 1.0) }
+}
+
+impl ops::Mul<f64> for Var {
+    type Output = Var;
+    fn mul(self, o: f64) -> Var { self.un(self.v * o, o) }
+}
+
+impl ops::Div<f64> for Var {
+    type Output = Var;
+    fn div(self, o: f64) -> Var { self.un(self.v / o, 1.0 / o) }
+}
+
+impl ops::Add<Var> for f64 {
+    type Output = Var;
+    fn add(self, o: Var) -> Var { o.un(self + o.v, 1.0) }
+}
+
+impl ops::Sub<Var> for f64 {
+    type Output = Var;
+    fn sub(self, o: Var) -> Var { o.un(self - o.v, -1.0) }
+}
+
+impl ops::Mul<Var> for f64 {
+    type Output = Var;
+    fn mul(self, o: Var) -> Var { o.un(self * o.v, self) }
+}
+
+impl ops::Div<Var> for f64 {
+    type Output = Var;
+    fn div(self, o: Var) -> Var {
+        let q = self / o.v;
+        o.un(q, -q / o.v)
+    }
+}
+
+impl ops::AddAssign for Var {
+    fn add_assign(ref self, o: Var) { self = self.clone() + o; }
+}
+
+impl ops::SubAssign for Var {
+    fn sub_assign(ref self, o: Var) { self = self.clone() - o; }
+}
+
+impl ops::MulAssign for Var {
+    fn mul_assign(ref self, o: Var) { self = self.clone() * o; }
+}
+
+impl ops::DivAssign for Var {
+    fn div_assign(ref self, o: Var) { self = self.clone() / o; }
+}
+
+impl ops::Pow<i32> for Var {
+    type Output = Var;
+    fn pow(self, n: i32) -> Var { self.powi(n) }
+}
+
+impl ops::Pow<f64> for Var {
+    type Output = Var;
+    fn pow(self, p: f64) -> Var { self.powf(p) }
+}
+
+impl ops::Pow<Var> for Var {
+    type Output = Var;
+    fn pow(self, y: Var) -> Var { Var::pow(self, y) }
+}
+
+impl ops::Pow<Var> for f64 {
+    type Output = Var;
+    fn pow(self, y: Var) -> Var {
+        let v = self.pow(y.v);
+        y.un(v, v * self.ln())
+    }
+}
+
+impl ops::Sqrt for Var {
+    type Output = Var;
+    fn sqrt(self) -> Var { Var::sqrt(self) }
+}

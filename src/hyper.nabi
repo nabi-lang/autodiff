@@ -1,0 +1,372 @@
+//! Hyper-dual numbers a + b ε1 + c ε2 + d ε1ε2 with ε1^2 = ε2^2 = 0
+//! (Fike and Alonso, 2011): the ε1ε2 part of f(x + ε1 e_i + ε2 e_j) is
+//! the exact second derivative d2f / dx_i dx_j, so a Hessian takes
+//! n (n + 1) / 2 evaluations with no step size.
+
+const LN2: f64 = 0.6931471805599453;
+const LN10: f64 = 2.302585092994046;
+
+/// `re + e1 ε1 + e2 ε2 + e12 ε1ε2`. The operators and methods are those
+/// of `Dual`; `e12` carries the mixed second derivative.
+///
+/// ```nabi
+/// use autodiff::HyperDual;
+///
+/// let x = HyperDual::new(2.0, 1.0, 1.0, 0.0);
+/// let y = x * x * x;
+/// assert(y.re == 8.0 && y.e1 == 12.0 && y.e12 == 12.0);   // f, f', f''
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct HyperDual {
+    /// The value.
+    pub re: f64;
+    /// The ε1 part: the derivative along the first direction.
+    pub e1: f64;
+    /// The ε2 part: the derivative along the second direction.
+    pub e2: f64;
+    /// The ε1ε2 part: the mixed second derivative.
+    pub e12: f64;
+}
+
+impl HyperDual {
+    /// `re + e1 ε1 + e2 ε2 + e12 ε1ε2`.
+    pub const fn new(re: f64, e1: f64, e2: f64, e12: f64) -> HyperDual { HyperDual { re, e1, e2, e12 } }
+
+    /// A constant.
+    ///
+    /// ```nabi
+    /// assert(autodiff::HyperDual::constant(3.0).e12 == 0.0);
+    /// ```
+    pub const fn constant(x: f64) -> HyperDual { HyperDual { re: x, e1: 0.0, e2: 0.0, e12: 0.0 } }
+
+    /// The variable seeded in both directions: `f(var(x)).e12` is f''(x).
+    ///
+    /// ```nabi
+    /// let y = autodiff::HyperDual::var(0.0).sin();
+    /// assert(y.e1 == 1.0 && y.e12 == 0.0);
+    /// ```
+    pub const fn var(x: f64) -> HyperDual { HyperDual { re: x, e1: 1.0, e2: 1.0, e12: 0.0 } }
+
+    // `g(self)` for `v = g(re)`, `d = g'(re)`, `dd = g''(re)`.
+    fn chain(self, v: f64, d: f64, dd: f64) -> HyperDual {
+        HyperDual { re: v, e1: d * self.e1, e2: d * self.e2, e12: d * self.e12 + dd * self.e1 * self.e2 }
+    }
+
+    /// The square root.
+    pub fn sqrt(self) -> HyperDual {
+        let x = self.re;
+        let s = x.sqrt();
+        self.chain(s, 0.5 / s, -0.25 / (s * x))
+    }
+
+    /// The cube root.
+    pub fn cbrt(self) -> HyperDual {
+        let x = self.re;
+        let c = x.cbrt();
+        self.chain(c, 1.0 / (3.0 * c * c), -2.0 / (9.0 * c * c * c * c * c))
+    }
+
+    /// `e^x`.
+    pub fn exp(self) -> HyperDual {
+        let x = self.re;
+        let e = x.exp();
+        self.chain(e, e, e)
+    }
+
+    /// `e^x - 1`, accurate near 0.
+    pub fn exp_m1(self) -> HyperDual {
+        let x = self.re;
+        let e = x.exp();
+        self.chain(x.exp_m1(), e, e)
+    }
+
+    /// `2^x`.
+    pub fn exp2(self) -> HyperDual {
+        let x = self.re;
+        let e = x.exp2();
+        self.chain(e, e * LN2, e * LN2 * LN2)
+    }
+
+    /// The natural logarithm.
+    pub fn ln(self) -> HyperDual {
+        let x = self.re;
+        self.chain(x.ln(), 1.0 / x, -1.0 / (x * x))
+    }
+
+    /// `ln(1 + x)`, accurate near 0.
+    pub fn ln_1p(self) -> HyperDual {
+        let x = self.re;
+        let u = 1.0 + x;
+        self.chain(x.ln_1p(), 1.0 / u, -1.0 / (u * u))
+    }
+
+    /// `log2 x`.
+    pub fn log2(self) -> HyperDual {
+        let x = self.re;
+        self.chain(x.log2(), 1.0 / (x * LN2), -1.0 / (x * x * LN2))
+    }
+
+    /// `log10 x`.
+    pub fn log10(self) -> HyperDual {
+        let x = self.re;
+        self.chain(x.log10(), 1.0 / (x * LN10), -1.0 / (x * x * LN10))
+    }
+
+    /// The sine.
+    pub fn sin(self) -> HyperDual {
+        let x = self.re;
+        let (s, c) = (x.sin(), x.cos());
+        self.chain(s, c, -s)
+    }
+
+    /// The cosine.
+    pub fn cos(self) -> HyperDual {
+        let x = self.re;
+        let (s, c) = (x.sin(), x.cos());
+        self.chain(c, -s, -c)
+    }
+
+    /// The tangent.
+    pub fn tan(self) -> HyperDual {
+        let x = self.re;
+        let t = x.tan();
+        self.chain(t, 1.0 + t * t, 2.0 * t * (1.0 + t * t))
+    }
+
+    /// The arcsine.
+    pub fn asin(self) -> HyperDual {
+        let x = self.re;
+        let w = 1.0 - x * x;
+        self.chain(x.asin(), 1.0 / w.sqrt(), x / (w * w.sqrt()))
+    }
+
+    /// The arccosine.
+    pub fn acos(self) -> HyperDual {
+        let x = self.re;
+        let w = 1.0 - x * x;
+        self.chain(x.acos(), -1.0 / w.sqrt(), -x / (w * w.sqrt()))
+    }
+
+    /// The arctangent.
+    pub fn atan(self) -> HyperDual {
+        let x = self.re;
+        let w = 1.0 + x * x;
+        self.chain(x.atan(), 1.0 / w, -2.0 * x / (w * w))
+    }
+
+    /// The hyperbolic sine.
+    pub fn sinh(self) -> HyperDual {
+        let x = self.re;
+        let (s, c) = (x.sinh(), x.cosh());
+        self.chain(s, c, s)
+    }
+
+    /// The hyperbolic cosine.
+    pub fn cosh(self) -> HyperDual {
+        let x = self.re;
+        let (s, c) = (x.sinh(), x.cosh());
+        self.chain(c, s, c)
+    }
+
+    /// The hyperbolic tangent.
+    pub fn tanh(self) -> HyperDual {
+        let x = self.re;
+        let t = x.tanh();
+        self.chain(t, 1.0 - t * t, -2.0 * t * (1.0 - t * t))
+    }
+
+    /// The inverse hyperbolic sine.
+    pub fn asinh(self) -> HyperDual {
+        let x = self.re;
+        let w = x * x + 1.0;
+        self.chain(x.asinh(), 1.0 / w.sqrt(), -x / (w * w.sqrt()))
+    }
+
+    /// The inverse hyperbolic cosine (`x >= 1`).
+    pub fn acosh(self) -> HyperDual {
+        let x = self.re;
+        let w = (x - 1.0).sqrt() * (x + 1.0).sqrt();
+        self.chain(x.acosh(), 1.0 / w, -x / (w * w * w))
+    }
+
+    /// The inverse hyperbolic tangent (`|x| < 1`).
+    pub fn atanh(self) -> HyperDual {
+        let x = self.re;
+        let w = 1.0 - x * x;
+        self.chain(x.atanh(), 1.0 / w, 2.0 * x / (w * w))
+    }
+
+    /// `1 / x`.
+    pub fn recip(self) -> HyperDual {
+        let x = self.re;
+        let r = 1.0 / x;
+        self.chain(r, -r * r, 2.0 * r * r * r)
+    }
+
+    /// `1 / (1 + e^-x)`.
+    pub fn sigmoid(self) -> HyperDual {
+        let x = self.re;
+        let s = pkg::dual::logistic(x);
+        self.chain(s, s * (1.0 - s), s * (1.0 - s) * (1.0 - 2.0 * s))
+    }
+
+    /// `|x|`; at 0 the derivatives taken are 0.
+    pub fn abs(self) -> HyperDual { if self.re > 0.0 { self } else if self.re < 0.0 { -self } else { HyperDual::constant(0.0) } }
+
+    /// `x^n` for an integer `n`.
+    pub fn powi(self, n: i32) -> HyperDual {
+        if n == 0 { return HyperDual::constant(1.0); }
+        let x = self.re;
+        let k = n as f64;
+        let d2 = if n == 1 { 0.0 } else { k * (k - 1.0) * x.powi(n - 2) };
+        self.chain(x.powi(n), k * x.powi(n - 1), d2)
+    }
+
+    /// `x^p` for a real `p`.
+    pub fn powf(self, p: f64) -> HyperDual {
+        if p == 0.0 { return HyperDual::constant(1.0); }
+        let x = self.re;
+        self.chain(x.pow(p), p * x.pow(p - 1.0), p * (p - 1.0) * x.pow(p - 2.0))
+    }
+
+    /// `x^y`, `exp(y ln x)`.
+    pub fn pow(self, y: HyperDual) -> HyperDual { (y * self.ln()).exp() }
+
+    /// `sqrt(x^2 + y^2)`.
+    pub fn hypot(self, y: HyperDual) -> HyperDual { (self * self + y * y).sqrt() }
+
+    /// The larger by value.
+    pub fn max(self, o: HyperDual) -> HyperDual { if o.re > self.re { o } else { self } }
+
+    /// The smaller by value.
+    pub fn min(self, o: HyperDual) -> HyperDual { if o.re < self.re { o } else { self } }
+
+    /// Whether every part is finite.
+    pub fn is_finite(self) -> bool { self.re.is_finite() && self.e1.is_finite() && self.e2.is_finite() && self.e12.is_finite() }
+}
+
+impl Display for HyperDual {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.re}+{self.e1}ε1+{self.e2}ε2+{self.e12}ε1ε2") }
+}
+
+impl Default for HyperDual {
+    fn default() -> HyperDual { HyperDual::constant(0.0) }
+}
+
+impl num::Zero for HyperDual {
+    fn zero() -> HyperDual { HyperDual::constant(0.0) }
+}
+
+impl num::One for HyperDual {
+    fn one() -> HyperDual { HyperDual::constant(1.0) }
+}
+
+impl ops::Add for HyperDual {
+    type Output = HyperDual;
+    fn add(self, o: HyperDual) -> HyperDual { HyperDual { re: self.re + o.re, e1: self.e1 + o.e1, e2: self.e2 + o.e2, e12: self.e12 + o.e12 } }
+}
+
+impl ops::Sub for HyperDual {
+    type Output = HyperDual;
+    fn sub(self, o: HyperDual) -> HyperDual { HyperDual { re: self.re - o.re, e1: self.e1 - o.e1, e2: self.e2 - o.e2, e12: self.e12 - o.e12 } }
+}
+
+impl ops::Mul for HyperDual {
+    type Output = HyperDual;
+    fn mul(self, o: HyperDual) -> HyperDual {
+        HyperDual {
+            re: self.re * o.re,
+            e1: self.re * o.e1 + self.e1 * o.re,
+            e2: self.re * o.e2 + self.e2 * o.re,
+            e12: self.re * o.e12 + self.e12 * o.re + self.e1 * o.e2 + self.e2 * o.e1,
+        }
+    }
+}
+
+impl ops::Div for HyperDual {
+    type Output = HyperDual;
+    fn div(self, o: HyperDual) -> HyperDual { self * o.recip() }
+}
+
+impl ops::Neg for HyperDual {
+    type Output = HyperDual;
+    fn neg(self) -> HyperDual { HyperDual { re: -self.re, e1: -self.e1, e2: -self.e2, e12: -self.e12 } }
+}
+
+impl ops::Add<f64> for HyperDual {
+    type Output = HyperDual;
+    fn add(self, o: f64) -> HyperDual { HyperDual { re: self.re + o, e1: self.e1, e2: self.e2, e12: self.e12 } }
+}
+
+impl ops::Sub<f64> for HyperDual {
+    type Output = HyperDual;
+    fn sub(self, o: f64) -> HyperDual { HyperDual { re: self.re - o, e1: self.e1, e2: self.e2, e12: self.e12 } }
+}
+
+impl ops::Mul<f64> for HyperDual {
+    type Output = HyperDual;
+    fn mul(self, o: f64) -> HyperDual { HyperDual { re: self.re * o, e1: self.e1 * o, e2: self.e2 * o, e12: self.e12 * o } }
+}
+
+impl ops::Div<f64> for HyperDual {
+    type Output = HyperDual;
+    fn div(self, o: f64) -> HyperDual { self * (1.0 / o) }
+}
+
+impl ops::Add<HyperDual> for f64 {
+    type Output = HyperDual;
+    fn add(self, o: HyperDual) -> HyperDual { o + self }
+}
+
+impl ops::Sub<HyperDual> for f64 {
+    type Output = HyperDual;
+    fn sub(self, o: HyperDual) -> HyperDual { -o + self }
+}
+
+impl ops::Mul<HyperDual> for f64 {
+    type Output = HyperDual;
+    fn mul(self, o: HyperDual) -> HyperDual { o * self }
+}
+
+impl ops::Div<HyperDual> for f64 {
+    type Output = HyperDual;
+    fn div(self, o: HyperDual) -> HyperDual { o.recip() * self }
+}
+
+impl ops::AddAssign for HyperDual {
+    fn add_assign(ref self, o: HyperDual) { self = self + o; }
+}
+
+impl ops::SubAssign for HyperDual {
+    fn sub_assign(ref self, o: HyperDual) { self = self - o; }
+}
+
+impl ops::MulAssign for HyperDual {
+    fn mul_assign(ref self, o: HyperDual) { self = self * o; }
+}
+
+impl ops::DivAssign for HyperDual {
+    fn div_assign(ref self, o: HyperDual) { self = self / o; }
+}
+
+impl ops::Pow<i32> for HyperDual {
+    type Output = HyperDual;
+    fn pow(self, n: i32) -> HyperDual { self.powi(n) }
+}
+
+impl ops::Pow<f64> for HyperDual {
+    type Output = HyperDual;
+    fn pow(self, p: f64) -> HyperDual { self.powf(p) }
+}
+
+impl ops::Sqrt for HyperDual {
+    type Output = HyperDual;
+    fn sqrt(self) -> HyperDual { HyperDual::sqrt(self) }
+}
+
+impl PartialOrd for HyperDual {
+    fn lt(self, o: HyperDual) -> bool { self.re < o.re }
+    fn le(self, o: HyperDual) -> bool { self.re <= o.re }
+    fn gt(self, o: HyperDual) -> bool { self.re > o.re }
+    fn ge(self, o: HyperDual) -> bool { self.re >= o.re }
+}

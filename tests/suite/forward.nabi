@@ -1,0 +1,94 @@
+use pkg::{Dual, Duals, HyperDual, Var};
+
+// (name, f(x) over Dual, f(x) over HyperDual, f(x) over Var, f'(x), f''(x), x)
+fn check(name: str, d: Dual, h: HyperDual, v: f64, f1: f64, f2: f64) {
+    assert(d.du.is_close(f1, rel: 1e-13, abs: 1e-15), f"{name}: dual {d.du} vs {f1}");
+    assert(h.e1.is_close(f1, rel: 1e-13, abs: 1e-15), f"{name}: hyper e1 {h.e1} vs {f1}");
+    assert(h.e12.is_close(f2, rel: 1e-12, abs: 1e-14), f"{name}: hyper e12 {h.e12} vs {f2}");
+    assert(v.is_close(f1, rel: 1e-13, abs: 1e-15), f"{name}: var {v} vs {f1}");
+}
+
+fn rev(x: f64, f: fn(Var) -> Var) -> f64 {
+    let t = pkg::Tape::new();
+    let a = t.var(x);
+    f(a).backward().wrt(a)
+}
+
+#[test]
+fn elementary() {
+    let x = 0.3;
+    let (d, h) = (Dual::var(x), HyperDual::var(x));
+    check("sqrt", d.sqrt(), h.sqrt(), rev(x, |a: Var| -> Var { a.sqrt() }), 0.5 / x.sqrt(), -0.25 * x.pow(-1.5));
+    check("cbrt", d.cbrt(), h.cbrt(), rev(x, |a: Var| -> Var { a.cbrt() }), x.pow(-2.0 / 3.0) / 3.0, -2.0 / 9.0 * x.pow(-5.0 / 3.0));
+    check("exp", d.exp(), h.exp(), rev(x, |a: Var| -> Var { a.exp() }), x.exp(), x.exp());
+    check("exp_m1", d.exp_m1(), h.exp_m1(), rev(x, |a: Var| -> Var { a.exp_m1() }), x.exp(), x.exp());
+    check("exp2", d.exp2(), h.exp2(), rev(x, |a: Var| -> Var { a.exp2() }), x.exp2() * 2.0f64.ln(), x.exp2() * 2.0f64.ln() * 2.0f64.ln());
+    check("ln", d.ln(), h.ln(), rev(x, |a: Var| -> Var { a.ln() }), 1.0 / x, -1.0 / (x * x));
+    check("ln_1p", d.ln_1p(), h.ln_1p(), rev(x, |a: Var| -> Var { a.ln_1p() }), 1.0 / (1.0 + x), -1.0 / ((1.0 + x) * (1.0 + x)));
+    check("log2", d.log2(), h.log2(), rev(x, |a: Var| -> Var { a.log2() }), 1.0 / (x * 2.0f64.ln()), -1.0 / (x * x * 2.0f64.ln()));
+    check("log10", d.log10(), h.log10(), rev(x, |a: Var| -> Var { a.log10() }), 1.0 / (x * 10.0f64.ln()), -1.0 / (x * x * 10.0f64.ln()));
+    check("sin", d.sin(), h.sin(), rev(x, |a: Var| -> Var { a.sin() }), x.cos(), -x.sin());
+    check("cos", d.cos(), h.cos(), rev(x, |a: Var| -> Var { a.cos() }), -x.sin(), -x.cos());
+    let sec2 = 1.0 / (x.cos() * x.cos());
+    check("tan", d.tan(), h.tan(), rev(x, |a: Var| -> Var { a.tan() }), sec2, 2.0 * x.tan() * sec2);
+    check("asin", d.asin(), h.asin(), rev(x, |a: Var| -> Var { a.asin() }), 1.0 / (1.0 - x * x).sqrt(), x * (1.0 - x * x).pow(-1.5));
+    check("acos", d.acos(), h.acos(), rev(x, |a: Var| -> Var { a.acos() }), -1.0 / (1.0 - x * x).sqrt(), -x * (1.0 - x * x).pow(-1.5));
+    check("atan", d.atan(), h.atan(), rev(x, |a: Var| -> Var { a.atan() }), 1.0 / (1.0 + x * x), -2.0 * x / ((1.0 + x * x) * (1.0 + x * x)));
+    check("sinh", d.sinh(), h.sinh(), rev(x, |a: Var| -> Var { a.sinh() }), x.cosh(), x.sinh());
+    check("cosh", d.cosh(), h.cosh(), rev(x, |a: Var| -> Var { a.cosh() }), x.sinh(), x.cosh());
+    let s2 = 1.0 / (x.cosh() * x.cosh());
+    check("tanh", d.tanh(), h.tanh(), rev(x, |a: Var| -> Var { a.tanh() }), s2, -2.0 * x.tanh() * s2);
+    check("asinh", d.asinh(), h.asinh(), rev(x, |a: Var| -> Var { a.asinh() }), 1.0 / (x * x + 1.0).sqrt(), -x * (x * x + 1.0).pow(-1.5));
+    check("atanh", d.atanh(), h.atanh(), rev(x, |a: Var| -> Var { a.atanh() }), 1.0 / (1.0 - x * x), 2.0 * x / ((1.0 - x * x) * (1.0 - x * x)));
+    check("recip", d.recip(), h.recip(), rev(x, |a: Var| -> Var { a.recip() }), -1.0 / (x * x), 2.0 / (x * x * x));
+    let s = 1.0 / (1.0 + (-x).exp());
+    check("sigmoid", d.sigmoid(), h.sigmoid(), rev(x, |a: Var| -> Var { a.sigmoid() }), s * (1.0 - s), s * (1.0 - s) * (1.0 - 2.0 * s));
+    check("powi", d.powi(5), h.powi(5), rev(x, |a: Var| -> Var { a.powi(5) }), 5.0 * x.powi(4), 20.0 * x.powi(3));
+    check("powf", d.powf(2.5), h.powf(2.5), rev(x, |a: Var| -> Var { a.powf(2.5) }), 2.5 * x.pow(1.5), 3.75 * x.pow(0.5));
+    let y = 2.0;
+    let (dc, hc) = (Dual::var(y), HyperDual::var(y));
+    check("acosh", dc.acosh(), hc.acosh(), rev(y, |a: Var| -> Var { a.acosh() }), 1.0 / (y * y - 1.0).sqrt(), -y * (y * y - 1.0).pow(-1.5));
+}
+
+#[test]
+fn lanes_match_dual() {
+    let x: Duals<3> = Duals::var(0.7, 0);
+    let d = Dual::var(0.7);
+    let fs: List<(Duals<3>, Dual)> = [(x.sin(), d.sin()), (x.exp(), d.exp()), (x.ln(), d.ln()), (x.tanh(), d.tanh()), (x.atan(), d.atan()), (x.sqrt(), d.sqrt()), (x.powf(1.3), d.powf(1.3)), (x.recip(), d.recip())];
+    for (a, b) in fs {
+        assert(a.re == b.re && a.du[0].is_close(b.du) && a.du[1] == 0.0 && a.du[2] == 0.0);
+    }
+}
+
+#[test]
+fn arithmetic() {
+    let x = Dual::var(3.0);
+    let y = Dual::constant(2.0);
+    assert((x / y).du == 0.5 && (y / x).du.is_close(-2.0 / 9.0));
+    assert((2.0 - x).du == -1.0 && (2.0 / x).du.is_close(-2.0 / 9.0));
+    assert((x ** 2).du == 6.0 && (x ** 0.5).du.is_close(0.5 / 3.0f64.sqrt()));
+    assert((2.0 ** x).du.is_close(8.0 * 2.0f64.ln()));
+    assert(x.pow(Dual::constant(2.0)).du == 6.0);
+    assert(x.atan2(Dual::constant(3.0)).du.is_close(1.0 / 6.0));
+    assert(x.hypot(Dual::constant(4.0)).du == 0.6);
+    assert(x.abs().du == 1.0 && (-x).abs().du == 1.0 && Dual::var(0.0).abs().du == 0.0);
+    assert(x.max(y).du == 1.0 && x.min(y).du == 0.0);
+    assert(x > y && y < x);
+    let z = x;
+    z += x;
+    z *= y;
+    z -= x;
+    z /= y;
+    assert(z.re == 4.5 && z.du == 1.5);
+    assert(f"{Dual::new(1.0, -2.0)}" == "1-2ε");
+    assert(Dual::var(1.0).mul_add(x, y).du == 4.0);
+}
+
+#[test]
+fn non_finite() {
+    assert(!Dual::var(0.0).sqrt().is_finite());
+    assert(Dual::var(-1.0).ln().re.is_nan());
+    assert(Dual::var(f64::INFINITY).exp().re == f64::INFINITY);
+    let h = HyperDual::var(0.0).sqrt();
+    assert(!h.is_finite());
+}

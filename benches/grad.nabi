@@ -1,0 +1,92 @@
+// The gradient of Rosenbrock's function in n variables by each mode:
+// Dual (n evaluations), Duals<8> (n / 8), Var (one evaluation and one
+// sweep). One item is one gradient.
+
+use pkg::{Dual, Duals, Smooth, Var};
+use core::array::{Array, Vector};
+use core::bench::Bench;
+use core::hint::black_box;
+
+fn rosen<T: Smooth>(x: Vector<T>) -> T {
+    let s = T::of(0.0);
+    for i in 0..x.len() - 1 {
+        let a = x[i + 1].clone() - x[i].clone() * x[i].clone();
+        let b = T::of(1.0) - x[i].clone();
+        s = s + a.clone() * a * 100.0 + b.clone() * b;
+    }
+    s
+}
+
+fn start(n: usize) -> Vector<f64> { Array::from_fn([n], |i: [usize; 1]| -> f64 { if i[0] % 2 == 0 { -1.2 } else { 1.0 } }) }
+
+#[bench]
+fn value_100(b: Bench) {
+    let x = start(100);
+    b.iter(|| rosen::<f64>(black_box(x)));
+}
+
+#[bench]
+fn dual_10(b: Bench) {
+    let x = start(10);
+    b.iter(|| pkg::grad(rosen::<Dual>, black_box(x)));
+}
+
+#[bench]
+fn dual_100(b: Bench) {
+    let x = start(100);
+    b.iter(|| pkg::grad(rosen::<Dual>, black_box(x)));
+}
+
+#[bench]
+fn dual_1000(b: Bench) {
+    let x = start(1000);
+    b.iter(|| pkg::grad(rosen::<Dual>, black_box(x)));
+}
+
+#[bench]
+fn duals8_10(b: Bench) {
+    let x = start(10);
+    b.iter(|| pkg::grad(rosen::<Duals<8>>, black_box(x)));
+}
+
+#[bench]
+fn duals8_100(b: Bench) {
+    let x = start(100);
+    b.iter(|| pkg::grad(rosen::<Duals<8>>, black_box(x)));
+}
+
+#[bench]
+fn duals8_1000(b: Bench) {
+    let x = start(1000);
+    b.iter(|| pkg::grad(rosen::<Duals<8>>, black_box(x)));
+}
+
+#[bench]
+fn var_10(b: Bench) {
+    let x = start(10);
+    b.iter(|| pkg::grad(rosen::<Var>, black_box(x)));
+}
+
+#[bench]
+fn var_100(b: Bench) {
+    let x = start(100);
+    b.iter(|| pkg::grad(rosen::<Var>, black_box(x)));
+}
+
+#[bench]
+fn var_1000(b: Bench) {
+    let x = start(1000);
+    b.iter(|| pkg::grad(rosen::<Var>, black_box(x)));
+}
+
+#[bench]
+fn var_10000(b: Bench) {
+    let x = start(10000);
+    b.iter(|| pkg::grad(rosen::<Var>, black_box(x)));
+}
+
+#[bench]
+fn hessian_10(b: Bench) {
+    let x = start(10);
+    b.iter(|| pkg::hessian(rosen::<pkg::HyperDual>, black_box(x)));
+}

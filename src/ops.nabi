@@ -1,0 +1,176 @@
+//! Calculus notation (feature `ops`, on by default):
+//!
+//!   2.0ε        the dual number 0 + 2ε: `x + 1.0ε` seeds a derivative
+//!   ∂(f)        the derivative of `f`, in `f`'s form: a function for a
+//!               function, a spline for a spline
+//!   ∂(f, n)     the n-th derivative (functions over `Jet`, splines)
+//!   ∇(f)        the gradient (or Jacobian) of `f`, a function for a
+//!               function; for an array of samples, the samples of the
+//!               gradient
+//!
+//! `∂` and `∇` never give a value at a point: write `∂(f)(x)` and
+//! `∇(f)(x)`. They dispatch through `Derive` and `Gradient`, which other
+//! packages implement for their own types (interpolate's splines and
+//! polynomials), so one `∂` and one `∇` serve every package that
+//! re-exports them. `∇` and `∂` are identifier characters, so they are
+//! function names here, not prefix operators.
+
+use pkg::{Dual, HyperDual, Jet, Var};
+use core::array::{Array, Matrix, Vector};
+
+/// `2.0ε`: the dual number `0 + 2ε`, so `3.0 + 1.0ε` is the variable 3
+/// seeded for a derivative.
+///
+/// ```nabi
+/// let x = 3.0 + 1.0ε;
+/// let y = x * x + 2.0 * x;
+/// assert(y.re == 15.0 && y.du == 8.0);
+/// ```
+#[literal(number "ε")]
+pub fn dual_literal(n: f64) -> Dual { Dual::new(0.0, n) }
+
+/// What `∂` differentiates: `Output` is the derivative in the same form.
+///
+/// ```nabi
+/// use autodiff::ops::{Derive, ∂};
+///
+/// // A polynomial by its coefficients.
+/// struct Poly { c: List<f64>; }
+///
+/// impl Derive for Poly {
+///     type Output = Poly;
+///     fn derive(self, nu: usize) -> Poly {
+///         let c = self.c.clone();
+///         for _ in 0..nu { c = List::from_fn(c.len().max(1) - 1, |i| c[i + 1] * ((i + 1) as f64)); }
+///         Poly { c }
+///     }
+/// }
+///
+/// let p = Poly { c: [1.0, 2.0, 3.0] };           // 1 + 2x + 3x^2
+/// assert(∂(p).c == [2.0, 6.0] && ∂(p, 2).c == [6.0]);
+/// ```
+pub trait Derive {
+    type Output;
+    /// The `nu`-th derivative.
+    fn derive(self, nu: usize) -> Output;
+}
+
+// `∂(f, n)` of a function over a first-order number type.
+fn first(nu: usize, what: str) {
+    if nu != 1 { panic(f"∂(f, {nu}) needs f written over Jet (|x: Jet| -> Jet {{ .. }}); a function over {what} has only its first derivative"); }
+}
+
+impl Derive for fn(Dual) -> Dual {
+    type Output = fn(f64) -> f64;
+    fn derive(self, nu: usize) -> fn(f64) -> f64 {
+        first(nu, "Dual");
+        |x: f64| -> f64 { self(Dual::var(x)).du }
+    }
+}
+
+impl Derive for fn(Var) -> Var {
+    type Output = fn(f64) -> f64;
+    fn derive(self, nu: usize) -> fn(f64) -> f64 {
+        first(nu, "Var");
+        |x: f64| -> f64 {
+            let t = pkg::Tape::new();
+            let v = t.var(x);
+            self(v).backward().wrt(v)
+        }
+    }
+}
+
+impl Derive for fn(HyperDual) -> HyperDual {
+    type Output = fn(f64) -> f64;
+    fn derive(self, nu: usize) -> fn(f64) -> f64 {
+        if nu == 1 { return |x: f64| -> f64 { self(HyperDual::var(x)).e1 }; }
+        if nu != 2 { panic(f"∂(f, {nu}) needs f written over Jet; a function over HyperDual has derivatives 1 and 2"); }
+        |x: f64| -> f64 { self(HyperDual::var(x)).e12 }
+    }
+}
+
+impl Derive for fn(Jet) -> Jet {
+    type Output = fn(f64) -> f64;
+    fn derive(self, nu: usize) -> fn(f64) -> f64 { |x: f64| -> f64 { self(Jet::var(x, nu)).derivative(nu) } }
+}
+
+/// `∂(f)`: the derivative of `f` in `f`'s form; `∂(f, n)` the n-th. For
+/// a function over `Dual` or `Var` it is `f'` as a function (first order
+/// only), over `HyperDual` orders 1 and 2, over `Jet` any order;
+/// interpolate's splines and polynomials give a spline or polynomial.
+///
+/// ```nabi
+/// use autodiff::{Dual, Jet};
+/// use autodiff::ops::∂;
+///
+/// let fp = ∂(|x: Dual| -> Dual { x.sin() });
+/// assert(fp(0.0) == 1.0);
+/// let f3 = ∂(|x: Jet| -> Jet { x.powi(4) }, 3);       // 24 x
+/// assert(f3(2.0) == 48.0);
+/// ```
+pub fn ∂<F: Derive>(f: F, nu: usize = 1) -> F::Output { f.derive(nu) }
+
+/// What `∇` takes the gradient of: `Output` is the gradient in the same
+/// form (a function for a function, samples for samples).
+pub trait Gradient {
+    type Output;
+    /// The gradient.
+    fn gradient(self) -> Output;
+}
+
+impl Gradient for fn(Vector<Dual>) -> Dual {
+    type Output = fn(Vector<f64>) -> Vector<f64>;
+    fn gradient(self) -> fn(Vector<f64>) -> Vector<f64> { |x: Vector<f64>| -> Vector<f64> { pkg::grad(self, x) } }
+}
+
+impl Gradient for fn(Vector<Var>) -> Var {
+    type Output = fn(Vector<f64>) -> Vector<f64>;
+    fn gradient(self) -> fn(Vector<f64>) -> Vector<f64> { |x: Vector<f64>| -> Vector<f64> { pkg::grad(self, x) } }
+}
+
+impl Gradient for fn(Vector<Dual>) -> Vector<Dual> {
+    type Output = fn(Vector<f64>) -> Matrix<f64>;
+    fn gradient(self) -> fn(Vector<f64>) -> Matrix<f64> { |x: Vector<f64>| -> Matrix<f64> { pkg::jacobian(self, x) } }
+}
+
+impl Gradient for fn(Vector<Var>) -> Vector<Var> {
+    type Output = fn(Vector<f64>) -> Matrix<f64>;
+    fn gradient(self) -> fn(Vector<f64>) -> Matrix<f64> { |x: Vector<f64>| -> Matrix<f64> { pkg::jacobian(self, x) } }
+}
+
+impl Gradient for Array<f64, 1> {
+    type Output = Vector<f64>;
+    fn gradient(self) -> Vector<f64> { pkg::grid::vector(self) }
+}
+
+impl Gradient for Array<f64, 2> {
+    type Output = List<Matrix<f64>>;
+    fn gradient(self) -> List<Matrix<f64>> { pkg::grid::every(self) }
+}
+
+impl Gradient for Array<f64, 3> {
+    type Output = List<Array<f64, 3>>;
+    fn gradient(self) -> List<Array<f64, 3>> { pkg::grid::every(self) }
+}
+
+/// `∇(f)`: the gradient of `f` as a function. For `f: R^n -> R` over
+/// `Dual` (n evaluations) or `Var` (one backward sweep) it is
+/// `x -> grad f(x)`; for a vector function, `x -> J(x)`. For samples
+/// on a unit grid it is the samples of the derivative (central
+/// differences): a vector for rank 1, one array per axis for ranks 2
+/// and 3.
+///
+/// ```nabi
+/// use autodiff::Var;
+/// use autodiff::ops::∇;
+/// use core::array::{Matrix, Vector};
+///
+/// let g = ∇(|x: Vector<Var>| -> Var { x[0] * x[0] + 3.0 * x[1] });
+/// assert(g([2.0, 0.0]).to_list() == [4.0, 3.0]);
+///
+/// let y: Vector<f64> = [0, 1, 4, 9];
+/// assert(∇(y).to_list() == [1.0, 2.0, 4.0, 5.0]);
+/// let z = Matrix::<f64>::from_fn([3, 4], |i: [usize; 2]| -> f64 { (2 * i[0] + i[1]) as f64 });
+/// assert(∇(z)[0][1, 1] == 2.0 && ∇(z)[1][1, 1] == 1.0);
+/// ```
+pub fn ∇<A: Gradient>(a: A) -> A::Output { a.gradient() }

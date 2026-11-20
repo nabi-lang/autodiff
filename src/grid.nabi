@@ -1,0 +1,29 @@
+//! The gradient of samples on a grid of unit spacing, what `∇` gives
+//! for an array: second-order central differences inside, first-order
+//! one-sided at the ends (NumPy's `gradient` with `edge_order = 1`). An
+//! axis of one sample has derivative 0. For a step, uneven positions or
+//! second-order ends use interpolate's `gradient`.
+
+use core::array::{Array, Vector};
+
+/// The derivative of `a` along `axis`.
+pub(pkg) fn along<const N: usize>(a: Array<f64, N>, axis: usize) -> Array<f64, N> {
+    let s = a.shape();
+    let n = s[axis];
+    Array::from_fn(s, |ix: [usize; N]| -> f64 {
+        if n < 2 { return 0.0; }
+        let i = ix[axis];
+        let (lo, hi) = (if i == 0 { 0 } else { i - 1 }, if i + 1 == n { i } else { i + 1 });
+        let p = ix;
+        let q = ix;
+        p[axis] = lo;
+        q[axis] = hi;
+        (a.at(q) - a.at(p)) / ((hi - lo) as f64)
+    })
+}
+
+/// The derivative along each axis, one array per axis.
+pub(pkg) fn every<const N: usize>(a: Array<f64, N>) -> List<Array<f64, N>> { List::from_fn(N, |k| along(a, k)) }
+
+/// The derivative of rank-1 samples.
+pub(pkg) fn vector(y: Vector<f64>) -> Vector<f64> { along(y, 0) }

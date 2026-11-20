@@ -1,0 +1,60 @@
+use pkg::{Tape, Var};
+
+#[test]
+fn shared_and_reused() {
+    let t = Tape::new();
+    let x = t.var(2.0);
+    let y = x.clone() * x.clone();        // a clone is the same variable
+    let z = y.clone() + y.clone() * 3.0;  // reuse adds adjoints
+    assert(z.backward().wrt(x) == 16.0);
+    assert(t.len() == 4);
+    assert(y.backward().wrt(x) == 4.0);   // any node can be swept
+}
+
+#[test]
+fn constants_and_unrelated() {
+    let t = Tape::new();
+    let x = t.var(1.0);
+    let u = t.var(5.0);
+    let c = Var::constant(3.0);
+    let y = c.clone() * x.clone() + c.clone();
+    let d = y.backward();
+    assert(d.wrt(x) == 3.0 && d.wrt(u) == 0.0 && d.wrt(c) == 0.0);
+    assert(c.clone().backward().wrt(x) == 0.0);
+    let p = c.clone() * c.clone();
+    assert(p.value() == 9.0 && t.len() == 4);
+}
+
+#[test]
+fn operators() {
+    let t = Tape::new();
+    let x = t.var(3.0);
+    let y = t.var(2.0);
+    let f = x.clone() / y.clone() - 2.0 / x.clone() + (2.0 - y.clone()) + x.clone() ** 2 + 2.0 ** y.clone() + x.clone().pow(y.clone());
+    let d = f.backward();
+    assert(d.wrt(x).is_close(0.5 + 2.0 / 9.0 + 6.0 + 2.0 * 3.0));
+    assert(d.wrt(y).is_close(-0.75 - 1.0 + 4.0 * 2.0f64.ln() + 9.0 * 3.0f64.ln()));
+    let g = x.clone().atan2(y.clone()).backward();
+    assert(g.wrt(x).is_close(2.0 / 13.0) && g.wrt(y).is_close(-3.0 / 13.0));
+    let h = x.clone().hypot(t.var(4.0));
+    assert(h.value() == 5.0 && h.backward().wrt(x) == 0.6);
+    let a = x.clone();
+    a += y.clone();
+    a *= y.clone();
+    a -= x.clone();
+    a /= y.clone();
+    assert(a.value() == 3.5 && a.backward().wrt(y).is_close(1.75));
+    assert(x > y && (-x.clone()).abs().backward().wrt(x) == 1.0);
+    assert(f"{x}" == "3" && f"{x:?}" == "Var(3)");
+}
+
+#[test]
+fn long_chain() {
+    // 100k nodes: the sweep is linear in the tape.
+    let t = Tape::new();
+    let x = t.var(1.0);
+    let s = x.clone();
+    for _ in 0..100000 { s = (s * 1.00001).sin() + x.clone() * 1e-5; }
+    let g = s.backward().wrt(x);
+    assert(g.is_finite() && t.len() > 200000);
+}

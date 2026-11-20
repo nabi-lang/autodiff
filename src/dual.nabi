@@ -1,0 +1,508 @@
+//! Forward mode with dual numbers a + b ε, ε^2 = 0: evaluating f at
+//! x + ε gives f(x) + f'(x) ε, exact to rounding, with no step size to
+//! choose.
+
+/// A dual number `re + du ε` with `ε^2 = 0`: `du` carries the
+/// derivative through every operation. The arithmetic operators take a
+/// `Dual` or an `f64` on either side, `**` takes an `i32`, `f64` or
+/// `Dual` exponent, and prefix `√` is the square root; the math
+/// functions are methods (`x.sin()`, `x.exp()`). Comparisons look at
+/// `re` only.
+///
+/// ```nabi
+/// use autodiff::Dual;
+///
+/// let x = Dual::var(2.0);                 // 2 + 1 ε
+/// let y = 3.0 * x ** 2 + x.sin();
+/// assert(y.re == 12.0 + 2.0f64.sin());
+/// assert(y.du == 12.0 + 2.0f64.cos());    // d/dx (3x^2 + sin x)
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Dual {
+    /// The value.
+    pub re: f64;
+    /// The derivative part, the coefficient of ε.
+    pub du: f64;
+}
+
+impl Dual {
+    /// `re + du ε`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::new(1.0, 2.0).du == 2.0);
+    /// ```
+    pub const fn new(re: f64, du: f64) -> Dual { Dual { re, du } }
+
+    /// A constant: `x + 0 ε`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::constant(4.0).du == 0.0);
+    /// ```
+    pub const fn constant(x: f64) -> Dual { Dual { re: x, du: 0.0 } }
+
+    /// The variable to differentiate by: `x + 1 ε`.
+    ///
+    /// ```nabi
+    /// let x = autodiff::Dual::var(3.0);
+    /// assert((x * x).du == 6.0);
+    /// ```
+    pub const fn var(x: f64) -> Dual { Dual { re: x, du: 1.0 } }
+
+    /// `self` with derivative part `d f(re)` for the value `v = f(re)`
+    /// and `f'(re) = d`: the chain rule step every function takes.
+    fn chain(self, v: f64, d: f64) -> Dual { Dual { re: v, du: d * self.du } }
+
+    /// The square root; at 0 the derivative is infinite.
+    ///
+    /// ```nabi
+    /// let y = autodiff::Dual::var(4.0).sqrt();
+    /// assert(y.re == 2.0 && y.du == 0.25);
+    /// ```
+    pub fn sqrt(self) -> Dual {
+        let s = self.re.sqrt();
+        self.chain(s, 0.5 / s)
+    }
+
+    /// `e^x`.
+    ///
+    /// ```nabi
+    /// let y = autodiff::Dual::var(0.0).exp();
+    /// assert(y.re == 1.0 && y.du == 1.0);
+    /// ```
+    pub fn exp(self) -> Dual {
+        let e = self.re.exp();
+        self.chain(e, e)
+    }
+
+    /// `e^x - 1`, accurate near 0.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).exp_m1().du == 1.0);
+    /// ```
+    pub fn exp_m1(self) -> Dual { self.chain(self.re.exp_m1(), self.re.exp()) }
+
+    /// The natural logarithm.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(2.0).ln().du == 0.5);
+    /// ```
+    pub fn ln(self) -> Dual { self.chain(self.re.ln(), 1.0 / self.re) }
+
+    /// `ln(1 + x)`, accurate near 0.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(1.0).ln_1p().du == 0.5);
+    /// ```
+    pub fn ln_1p(self) -> Dual { self.chain(self.re.ln_1p(), 1.0 / (1.0 + self.re)) }
+
+    /// The sine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).sin().du == 1.0);
+    /// ```
+    pub fn sin(self) -> Dual { self.chain(self.re.sin(), self.re.cos()) }
+
+    /// The cosine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).cos().du == 0.0);
+    /// ```
+    pub fn cos(self) -> Dual { self.chain(self.re.cos(), -self.re.sin()) }
+
+    /// The tangent.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).tan().du == 1.0);
+    /// ```
+    pub fn tan(self) -> Dual {
+        let t = self.re.tan();
+        self.chain(t, 1.0 + t * t)
+    }
+
+    /// The arcsine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).asin().du == 1.0);
+    /// ```
+    pub fn asin(self) -> Dual { self.chain(self.re.asin(), 1.0 / (1.0 - self.re * self.re).sqrt()) }
+
+    /// The arccosine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).acos().du == -1.0);
+    /// ```
+    pub fn acos(self) -> Dual { self.chain(self.re.acos(), -1.0 / (1.0 - self.re * self.re).sqrt()) }
+
+    /// The arctangent.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(1.0).atan().du == 0.5);
+    /// ```
+    pub fn atan(self) -> Dual { self.chain(self.re.atan(), 1.0 / (1.0 + self.re * self.re)) }
+
+    /// `atan2(self, x)`, the angle of the point `(x, self)`.
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// let a = Dual::var(1.0).atan2(Dual::constant(1.0));
+    /// assert((a.du - 0.5).abs() < 1e-15);
+    /// ```
+    pub fn atan2(self, x: Dual) -> Dual {
+        let r2 = x.re * x.re + self.re * self.re;
+        Dual { re: self.re.atan2(x.re), du: (x.re * self.du - self.re * x.du) / r2 }
+    }
+
+    /// The hyperbolic sine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).sinh().du == 1.0);
+    /// ```
+    pub fn sinh(self) -> Dual { self.chain(self.re.sinh(), self.re.cosh()) }
+
+    /// The hyperbolic cosine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).cosh().du == 0.0);
+    /// ```
+    pub fn cosh(self) -> Dual { self.chain(self.re.cosh(), self.re.sinh()) }
+
+    /// The hyperbolic tangent.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).tanh().du == 1.0);
+    /// ```
+    pub fn tanh(self) -> Dual {
+        let t = self.re.tanh();
+        self.chain(t, 1.0 - t * t)
+    }
+
+    /// `|x|`; at 0 the derivative taken is 0.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(-2.0).abs().du == -1.0);
+    /// ```
+    pub fn abs(self) -> Dual {
+        if self.re > 0.0 { self } else if self.re < 0.0 { -self } else { Dual { re: 0.0, du: 0.0 } }
+    }
+
+    /// `x^n` for an integer `n`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(2.0).powi(3).du == 12.0);
+    /// ```
+    pub fn powi(self, n: i32) -> Dual {
+        if n == 0 { return Dual { re: 1.0, du: 0.0 }; }
+        self.chain(self.re.powi(n), (n as f64) * self.re.powi(n - 1))
+    }
+
+    /// `x^p` for a real `p`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(4.0).powf(0.5).du == 0.25);
+    /// ```
+    pub fn powf(self, p: f64) -> Dual {
+        if p == 0.0 { return Dual { re: 1.0, du: 0.0 }; }
+        self.chain(self.re.pow(p), p * self.re.pow(p - 1.0))
+    }
+
+    /// `x^y` with both parts dual, `exp(y ln x)`; needs `x > 0` unless
+    /// `y` is a constant.
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// let y = Dual::constant(2.0).pow(Dual::var(3.0));    // d/dy 2^y
+    /// assert((y.du - 8.0 * 2.0f64.ln()).abs() < 1e-14);
+    /// ```
+    pub fn pow(self, y: Dual) -> Dual {
+        if y.du == 0.0 { return self.powf(y.re); }
+        let v = self.re.pow(y.re);
+        let dx = if self.du == 0.0 { 0.0 } else { y.re * self.re.pow(y.re - 1.0) * self.du };
+        Dual { re: v, du: dx + v * self.re.ln() * y.du }
+    }
+
+    /// `sqrt(x^2 + y^2)` without overflow.
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// assert(Dual::var(3.0).hypot(Dual::constant(4.0)).du == 0.6);
+    /// ```
+    pub fn hypot(self, y: Dual) -> Dual {
+        let h = self.re.hypot(y.re);
+        if h == 0.0 { return Dual { re: 0.0, du: 0.0 }; }
+        Dual { re: h, du: (self.re * self.du + y.re * y.du) / h }
+    }
+
+    /// The larger by value (`self` on a tie).
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// assert(Dual::var(1.0).max(Dual::constant(2.0)).du == 0.0);
+    /// ```
+    pub fn max(self, o: Dual) -> Dual { if o.re > self.re { o } else { self } }
+
+    /// The smaller by value (`self` on a tie).
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// assert(Dual::var(1.0).min(Dual::constant(2.0)).du == 1.0);
+    /// ```
+    pub fn min(self, o: Dual) -> Dual { if o.re < self.re { o } else { self } }
+
+    /// `log2 x`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(2.0).log2().re == 1.0);
+    /// ```
+    pub fn log2(self) -> Dual { self.chain(self.re.log2(), 1.0 / (self.re * 0.6931471805599453)) }
+
+    /// `log10 x`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(10.0).log10().re == 1.0);
+    /// ```
+    pub fn log10(self) -> Dual { self.chain(self.re.log10(), 1.0 / (self.re * 2.302585092994046)) }
+
+    /// `2^x`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).exp2().du == 0.6931471805599453);
+    /// ```
+    pub fn exp2(self) -> Dual {
+        let e = self.re.exp2();
+        self.chain(e, e * 0.6931471805599453)
+    }
+
+    /// The cube root; at 0 the derivative is infinite.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(8.0).cbrt().du == 1.0 / 12.0);
+    /// ```
+    pub fn cbrt(self) -> Dual {
+        let c = self.re.cbrt();
+        self.chain(c, 1.0 / (3.0 * c * c))
+    }
+
+    /// `1 / x`.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(2.0).recip().du == -0.25);
+    /// ```
+    pub fn recip(self) -> Dual {
+        let r = 1.0 / self.re;
+        self.chain(r, -r * r)
+    }
+
+    /// The inverse hyperbolic sine.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).asinh().du == 1.0);
+    /// ```
+    pub fn asinh(self) -> Dual { self.chain(self.re.asinh(), 1.0 / (self.re * self.re + 1.0).sqrt()) }
+
+    /// The inverse hyperbolic cosine (`x >= 1`).
+    ///
+    /// ```nabi
+    /// let d = autodiff::Dual::var(2.0).acosh().du;
+    /// assert(d.is_close(1.0 / 3.0f64.sqrt()));
+    /// ```
+    pub fn acosh(self) -> Dual { self.chain(self.re.acosh(), 1.0 / ((self.re - 1.0).sqrt() * (self.re + 1.0).sqrt())) }
+
+    /// The inverse hyperbolic tangent (`|x| < 1`).
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.5).atanh().du == 1.0 / 0.75);
+    /// ```
+    pub fn atanh(self) -> Dual { self.chain(self.re.atanh(), 1.0 / (1.0 - self.re * self.re)) }
+
+    /// `1 / (1 + e^-x)`, the logistic function.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(0.0).sigmoid().du == 0.25);
+    /// ```
+    pub fn sigmoid(self) -> Dual {
+        let s = logistic(self.re);
+        self.chain(s, s * (1.0 - s))
+    }
+
+    /// `x * y + z` with one rounding in the value.
+    ///
+    /// ```nabi
+    /// use autodiff::Dual;
+    ///
+    /// let y = Dual::var(2.0).mul_add(Dual::constant(3.0), Dual::constant(1.0));
+    /// assert(y.re == 7.0 && y.du == 3.0);
+    /// ```
+    pub fn mul_add(self, y: Dual, z: Dual) -> Dual {
+        Dual { re: self.re.mul_add(y.re, z.re), du: self.du * y.re + self.re * y.du + z.du }
+    }
+
+    /// The sign of the value (`1`, `-1`, or NaN for NaN); derivative 0.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(-3.0).signum().re == -1.0);
+    /// ```
+    pub fn signum(self) -> Dual { Dual { re: self.re.signum(), du: 0.0 } }
+
+    /// Whether both parts are finite.
+    ///
+    /// ```nabi
+    /// assert(autodiff::Dual::var(1.0).is_finite());
+    /// ```
+    pub fn is_finite(self) -> bool { self.re.is_finite() && self.du.is_finite() }
+}
+
+impl Display for Dual {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        if self.du < 0.0 { try f.write_str(f"{self.re}-{-self.du}ε") } else { try f.write_str(f"{self.re}+{self.du}ε") }
+    }
+}
+
+impl Default for Dual {
+    fn default() -> Dual { Dual { re: 0.0, du: 0.0 } }
+}
+
+impl num::Zero for Dual {
+    fn zero() -> Dual { Dual { re: 0.0, du: 0.0 } }
+}
+
+impl num::One for Dual {
+    fn one() -> Dual { Dual { re: 1.0, du: 0.0 } }
+}
+
+impl ops::Add for Dual {
+    type Output = Dual;
+    fn add(self, o: Dual) -> Dual { Dual { re: self.re + o.re, du: self.du + o.du } }
+}
+
+impl ops::Sub for Dual {
+    type Output = Dual;
+    fn sub(self, o: Dual) -> Dual { Dual { re: self.re - o.re, du: self.du - o.du } }
+}
+
+impl ops::Mul for Dual {
+    type Output = Dual;
+    fn mul(self, o: Dual) -> Dual { Dual { re: self.re * o.re, du: self.du * o.re + self.re * o.du } }
+}
+
+impl ops::Div for Dual {
+    type Output = Dual;
+    fn div(self, o: Dual) -> Dual {
+        let q = self.re / o.re;
+        Dual { re: q, du: (self.du - q * o.du) / o.re }
+    }
+}
+
+impl ops::Neg for Dual {
+    type Output = Dual;
+    fn neg(self) -> Dual { Dual { re: -self.re, du: -self.du } }
+}
+
+impl ops::Add<f64> for Dual {
+    type Output = Dual;
+    fn add(self, o: f64) -> Dual { Dual { re: self.re + o, du: self.du } }
+}
+
+impl ops::Sub<f64> for Dual {
+    type Output = Dual;
+    fn sub(self, o: f64) -> Dual { Dual { re: self.re - o, du: self.du } }
+}
+
+impl ops::Mul<f64> for Dual {
+    type Output = Dual;
+    fn mul(self, o: f64) -> Dual { Dual { re: self.re * o, du: self.du * o } }
+}
+
+impl ops::Div<f64> for Dual {
+    type Output = Dual;
+    fn div(self, o: f64) -> Dual { Dual { re: self.re / o, du: self.du / o } }
+}
+
+impl ops::Add<Dual> for f64 {
+    type Output = Dual;
+    fn add(self, o: Dual) -> Dual { Dual { re: self + o.re, du: o.du } }
+}
+
+impl ops::Sub<Dual> for f64 {
+    type Output = Dual;
+    fn sub(self, o: Dual) -> Dual { Dual { re: self - o.re, du: -o.du } }
+}
+
+impl ops::Mul<Dual> for f64 {
+    type Output = Dual;
+    fn mul(self, o: Dual) -> Dual { Dual { re: self * o.re, du: self * o.du } }
+}
+
+impl ops::Div<Dual> for f64 {
+    type Output = Dual;
+    fn div(self, o: Dual) -> Dual {
+        let q = self / o.re;
+        Dual { re: q, du: -q * o.du / o.re }
+    }
+}
+
+impl ops::AddAssign for Dual {
+    fn add_assign(ref self, o: Dual) { self.re += o.re; self.du += o.du; }
+}
+
+impl ops::SubAssign for Dual {
+    fn sub_assign(ref self, o: Dual) { self.re -= o.re; self.du -= o.du; }
+}
+
+impl ops::MulAssign for Dual {
+    fn mul_assign(ref self, o: Dual) {
+        self.du = self.du * o.re + self.re * o.du;
+        self.re *= o.re;
+    }
+}
+
+impl ops::Pow<i32> for Dual {
+    type Output = Dual;
+    fn pow(self, n: i32) -> Dual { self.powi(n) }
+}
+
+impl ops::Pow<f64> for Dual {
+    type Output = Dual;
+    fn pow(self, p: f64) -> Dual { self.powf(p) }
+}
+
+impl ops::Pow<Dual> for Dual {
+    type Output = Dual;
+    fn pow(self, y: Dual) -> Dual { Dual::pow(self, y) }
+}
+
+impl ops::Pow<Dual> for f64 {
+    type Output = Dual;
+    fn pow(self, y: Dual) -> Dual { Dual::constant(self).pow(y) }
+}
+
+impl ops::Sqrt for Dual {
+    type Output = Dual;
+    fn sqrt(self) -> Dual { Dual::sqrt(self) }
+}
+
+impl PartialOrd for Dual {
+    fn lt(self, o: Dual) -> bool { self.re < o.re }
+    fn le(self, o: Dual) -> bool { self.re <= o.re }
+    fn gt(self, o: Dual) -> bool { self.re > o.re }
+    fn ge(self, o: Dual) -> bool { self.re >= o.re }
+}
+
+impl ops::DivAssign for Dual {
+    fn div_assign(ref self, o: Dual) {
+        let q = self.re / o.re;
+        self.du = (self.du - q * o.du) / o.re;
+        self.re = q;
+    }
+}
+
+/// `1 / (1 + e^-x)` without overflow for either sign.
+pub(pkg) fn logistic(x: f64) -> f64 {
+    if x >= 0.0 { return 1.0 / (1.0 + (-x).exp()); }
+    let e = x.exp();
+    e / (1.0 + e)
+}

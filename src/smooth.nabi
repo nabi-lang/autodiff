@@ -1,0 +1,202 @@
+//! `Smooth`: the number types a function can be written over, so one
+//! generic function serves plain evaluation (f64), every AD mode (Dual,
+//! Duals, HyperDual, Jet, Var) and complex-step differentiation
+//! (Complex<f64>).
+
+use pkg::{Dual, Duals, HyperDual, Jet, Var};
+use core::num::Complex;
+
+/// A number a function is written over: `f64`, `Dual`, `Duals<N>`,
+/// `HyperDual`, `Jet`, `Var` or `Complex<f64>`. It has the arithmetic operators, with an `f64` on
+/// the right too (`x * 2.0`), and the elementary functions; write an
+/// `f64` constant on the left as `T::of(c)`. For `Complex<f64>`, `abs`
+/// keeps the sign of the real part, so the complex step still
+/// differentiates it; in a function generic over `T: Smooth`,
+/// `x.abs()` is this method, not core's modulus.
+///
+/// ```nabi
+/// use autodiff::{Dual, Smooth, Var};
+/// use core::array::Vector;
+///
+/// fn rosen<T: Smooth>(x: Vector<T>) -> T {
+///     let a = x[1] - x[0] * x[0];
+///     let b = T::of(1.0) - x[0];
+///     a * a * 100.0 + b * b
+/// }
+///
+/// let x: Vector<f64> = [1.0, 1.0];
+/// assert(rosen(x) == 0.0);
+/// let g = autodiff::grad(rosen::<Dual>, [-1.0, 1.0]);
+/// assert(g[0] == -4.0 && g[1] == 0.0);
+/// assert(autodiff::grad(rosen::<Var>, [-1.0, 1.0]) == g);
+/// ```
+pub trait Smooth: Clone + ops::Add<Output = Self> + ops::Sub<Output = Self> + ops::Mul<Output = Self>
+    + ops::Div<Output = Self> + ops::Neg<Output = Self> + ops::Add<f64, Output = Self> + ops::Sub<f64, Output = Self>
+    + ops::Mul<f64, Output = Self> + ops::Div<f64, Output = Self> {
+        /// `x` as this type, a constant.
+        fn of(x: f64) -> Self;
+        /// The real value.
+        fn value(self) -> f64;
+        /// The square root.
+        fn sqrt(self) -> Self;
+        /// `e^x`.
+        fn exp(self) -> Self;
+        /// The natural logarithm.
+        fn ln(self) -> Self;
+        /// The sine.
+        fn sin(self) -> Self;
+        /// The cosine.
+        fn cos(self) -> Self;
+        /// The tangent.
+        fn tan(self) -> Self;
+        /// The arctangent.
+        fn atan(self) -> Self;
+        /// The hyperbolic sine.
+        fn sinh(self) -> Self;
+        /// The hyperbolic cosine.
+        fn cosh(self) -> Self;
+        /// The hyperbolic tangent.
+        fn tanh(self) -> Self;
+        /// The absolute value.
+        fn abs(self) -> Self;
+        /// `x^n`.
+        fn powi(self, n: i32) -> Self;
+        /// `x^p`.
+        fn powf(self, p: f64) -> Self;
+    }
+
+impl Smooth for f64 {
+    fn of(x: f64) -> f64 { x }
+    fn value(self) -> f64 { self }
+    fn sqrt(self) -> f64 { f64::sqrt(self) }
+    fn exp(self) -> f64 { f64::exp(self) }
+    fn ln(self) -> f64 { f64::ln(self) }
+    fn sin(self) -> f64 { f64::sin(self) }
+    fn cos(self) -> f64 { f64::cos(self) }
+    fn tan(self) -> f64 { f64::tan(self) }
+    fn atan(self) -> f64 { f64::atan(self) }
+    fn sinh(self) -> f64 { f64::sinh(self) }
+    fn cosh(self) -> f64 { f64::cosh(self) }
+    fn tanh(self) -> f64 { f64::tanh(self) }
+    fn abs(self) -> f64 { f64::abs(self) }
+    fn powi(self, n: i32) -> f64 { f64::powi(self, n) }
+    fn powf(self, p: f64) -> f64 { f64::pow(self, p) }
+}
+
+// The complex forms are the analytic continuations, which is what the
+// complex step needs.
+impl Smooth for Complex<f64> {
+    fn of(x: f64) -> Complex<f64> { Complex::new(x, 0.0) }
+    fn value(self) -> f64 { self.re }
+    fn sqrt(self) -> Complex<f64> { Complex::sqrt(self) }
+    fn exp(self) -> Complex<f64> { Complex::exp(self) }
+    fn ln(self) -> Complex<f64> { Complex::ln(self) }
+    fn sin(self) -> Complex<f64> { Complex::new(self.re.sin() * self.im.cosh(), self.re.cos() * self.im.sinh()) }
+    fn cos(self) -> Complex<f64> { Complex::new(self.re.cos() * self.im.cosh(), -self.re.sin() * self.im.sinh()) }
+    fn tan(self) -> Complex<f64> { Smooth::sin(self) / Smooth::cos(self) }
+    fn atan(self) -> Complex<f64> {
+        // atan(a + ib) by parts; ln_1p keeps a tiny b.
+        let (a, b) = (self.re, self.im);
+        let d = a * a + (b - 1.0) * (b - 1.0);
+        Complex::new(0.5 * (2.0 * a).atan2(1.0 - a * a - b * b), 0.25 * (4.0 * b / d).ln_1p())
+    }
+    fn sinh(self) -> Complex<f64> { Complex::new(self.re.sinh() * self.im.cos(), self.re.cosh() * self.im.sin()) }
+    fn cosh(self) -> Complex<f64> { Complex::new(self.re.cosh() * self.im.cos(), self.re.sinh() * self.im.sin()) }
+    fn tanh(self) -> Complex<f64> { Smooth::sinh(self) / Smooth::cosh(self) }
+    fn abs(self) -> Complex<f64> { if self.re < 0.0 { -self } else { self } }
+    fn powi(self, n: i32) -> Complex<f64> { Complex::powi(self, n) }
+    fn powf(self, p: f64) -> Complex<f64> {
+        if self.re == 0.0 && self.im == 0.0 { return self; }
+        Complex::exp(Complex::ln(self) * p)
+    }
+}
+
+impl Smooth for Dual {
+    fn of(x: f64) -> Dual { Dual::constant(x) }
+    fn value(self) -> f64 { self.re }
+    fn sqrt(self) -> Dual { Dual::sqrt(self) }
+    fn exp(self) -> Dual { Dual::exp(self) }
+    fn ln(self) -> Dual { Dual::ln(self) }
+    fn sin(self) -> Dual { Dual::sin(self) }
+    fn cos(self) -> Dual { Dual::cos(self) }
+    fn tan(self) -> Dual { Dual::tan(self) }
+    fn atan(self) -> Dual { Dual::atan(self) }
+    fn sinh(self) -> Dual { Dual::sinh(self) }
+    fn cosh(self) -> Dual { Dual::cosh(self) }
+    fn tanh(self) -> Dual { Dual::tanh(self) }
+    fn abs(self) -> Dual { Dual::abs(self) }
+    fn powi(self, n: i32) -> Dual { Dual::powi(self, n) }
+    fn powf(self, p: f64) -> Dual { Dual::powf(self, p) }
+}
+
+impl<const N: usize> Smooth for Duals<N> {
+    fn of(x: f64) -> Duals<N> { Duals::constant(x) }
+    fn value(self) -> f64 { self.re }
+    fn sqrt(self) -> Duals<N> { Duals::sqrt(self) }
+    fn exp(self) -> Duals<N> { Duals::exp(self) }
+    fn ln(self) -> Duals<N> { Duals::ln(self) }
+    fn sin(self) -> Duals<N> { Duals::sin(self) }
+    fn cos(self) -> Duals<N> { Duals::cos(self) }
+    fn tan(self) -> Duals<N> { Duals::tan(self) }
+    fn atan(self) -> Duals<N> { Duals::atan(self) }
+    fn sinh(self) -> Duals<N> { Duals::sinh(self) }
+    fn cosh(self) -> Duals<N> { Duals::cosh(self) }
+    fn tanh(self) -> Duals<N> { Duals::tanh(self) }
+    fn abs(self) -> Duals<N> { Duals::abs(self) }
+    fn powi(self, n: i32) -> Duals<N> { Duals::powi(self, n) }
+    fn powf(self, p: f64) -> Duals<N> { Duals::powf(self, p) }
+}
+
+impl Smooth for HyperDual {
+    fn of(x: f64) -> HyperDual { HyperDual::constant(x) }
+    fn value(self) -> f64 { self.re }
+    fn sqrt(self) -> HyperDual { HyperDual::sqrt(self) }
+    fn exp(self) -> HyperDual { HyperDual::exp(self) }
+    fn ln(self) -> HyperDual { HyperDual::ln(self) }
+    fn sin(self) -> HyperDual { HyperDual::sin(self) }
+    fn cos(self) -> HyperDual { HyperDual::cos(self) }
+    fn tan(self) -> HyperDual { HyperDual::tan(self) }
+    fn atan(self) -> HyperDual { HyperDual::atan(self) }
+    fn sinh(self) -> HyperDual { HyperDual::sinh(self) }
+    fn cosh(self) -> HyperDual { HyperDual::cosh(self) }
+    fn tanh(self) -> HyperDual { HyperDual::tanh(self) }
+    fn abs(self) -> HyperDual { HyperDual::abs(self) }
+    fn powi(self, n: i32) -> HyperDual { HyperDual::powi(self, n) }
+    fn powf(self, p: f64) -> HyperDual { HyperDual::powf(self, p) }
+}
+
+impl Smooth for Jet {
+    fn of(x: f64) -> Jet { Jet::constant(x, 0) }
+    fn value(self) -> f64 { self.value() }
+    fn sqrt(self) -> Jet { Jet::sqrt(self) }
+    fn exp(self) -> Jet { Jet::exp(self) }
+    fn ln(self) -> Jet { Jet::ln(self) }
+    fn sin(self) -> Jet { Jet::sin(self) }
+    fn cos(self) -> Jet { Jet::cos(self) }
+    fn tan(self) -> Jet { Jet::tan(self) }
+    fn atan(self) -> Jet { Jet::atan(self) }
+    fn sinh(self) -> Jet { Jet::sinh(self) }
+    fn cosh(self) -> Jet { Jet::cosh(self) }
+    fn tanh(self) -> Jet { Jet::tanh(self) }
+    fn abs(self) -> Jet { Jet::abs(self) }
+    fn powi(self, n: i32) -> Jet { Jet::powi(self, n) }
+    fn powf(self, p: f64) -> Jet { Jet::powf(self, p) }
+}
+
+impl Smooth for Var {
+    fn of(x: f64) -> Var { Var::constant(x) }
+    fn value(self) -> f64 { self.value() }
+    fn sqrt(self) -> Var { Var::sqrt(self) }
+    fn exp(self) -> Var { Var::exp(self) }
+    fn ln(self) -> Var { Var::ln(self) }
+    fn sin(self) -> Var { Var::sin(self) }
+    fn cos(self) -> Var { Var::cos(self) }
+    fn tan(self) -> Var { Var::tan(self) }
+    fn atan(self) -> Var { Var::atan(self) }
+    fn sinh(self) -> Var { Var::sinh(self) }
+    fn cosh(self) -> Var { Var::cosh(self) }
+    fn tanh(self) -> Var { Var::tanh(self) }
+    fn abs(self) -> Var { Var::abs(self) }
+    fn powi(self, n: i32) -> Var { Var::powi(self, n) }
+    fn powf(self, p: f64) -> Var { Var::powf(self, p) }
+}

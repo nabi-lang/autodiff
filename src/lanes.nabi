@@ -1,0 +1,399 @@
+//! Multi-lane forward mode: a value with `N` derivative parts, so one
+//! evaluation pushes `N` directions at once and a gradient of `n`
+//! variables takes `ceil(n / N)` evaluations instead of `n`.
+
+use core::array::{Array, Vector};
+
+/// `re + du[0] ε_0 + .. + du[N-1] ε_{N-1}` with every `ε_i ε_j = 0`: a
+/// dual number carrying `N` directional derivatives. The operators and
+/// methods are those of `Dual`.
+///
+/// ```nabi
+/// use autodiff::Duals;
+///
+/// let x: Duals<2> = Duals::var(3.0, 0);
+/// let y: Duals<2> = Duals::var(4.0, 1);
+/// let r = (x * x + y * y).sqrt();
+/// assert(r.re == 5.0 && r.du[0].is_close(0.6) && r.du[1].is_close(0.8));
+/// ```
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Duals<const N: usize> {
+    /// The value.
+    pub re: f64;
+    /// The derivative parts.
+    pub du: [f64; N];
+}
+
+impl<const N: usize> Duals<N> {
+    /// A constant: every derivative part 0.
+    ///
+    /// ```nabi
+    /// let c: autodiff::Duals<3> = autodiff::Duals::constant(2.0);
+    /// assert(c.du == [0.0, 0.0, 0.0]);
+    /// ```
+    pub fn constant(x: f64) -> Duals<N> { Duals { re: x, du: [0.0; N] } }
+
+    /// The variable of lane `k`: derivative part `k` is 1, the others 0
+    /// (`k >= N` seeds none).
+    ///
+    /// ```nabi
+    /// let x: autodiff::Duals<2> = autodiff::Duals::var(1.0, 1);
+    /// assert(x.du == [0.0, 1.0]);
+    /// ```
+    pub fn var(x: f64, k: usize) -> Duals<N> {
+        let d = [0.0; N];
+        if k < N { d[k] = 1.0; }
+        Duals { re: x, du: d }
+    }
+
+    // `g(self)` with value `v` and `g'(re) = d`.
+    fn chain(self, v: f64, d: f64) -> Duals<N> {
+        let o = self.du;
+        for i in 0..N { o[i] = d * self.du[i]; }
+        Duals { re: v, du: o }
+    }
+
+    /// The square root.
+    pub fn sqrt(self) -> Duals<N> {
+        let x = self.re;
+        let s = x.sqrt();
+        self.chain(s, 0.5 / s)
+    }
+
+    /// The cube root.
+    pub fn cbrt(self) -> Duals<N> {
+        let x = self.re;
+        let c = x.cbrt();
+        self.chain(c, 1.0 / (3.0 * c * c))
+    }
+
+    /// `e^x`.
+    pub fn exp(self) -> Duals<N> {
+        let x = self.re;
+        let e = x.exp();
+        self.chain(e, e)
+    }
+
+    /// `e^x - 1`, accurate near 0.
+    pub fn exp_m1(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.exp_m1(), x.exp())
+    }
+
+    /// `2^x`.
+    pub fn exp2(self) -> Duals<N> {
+        let x = self.re;
+        let e = x.exp2();
+        self.chain(e, e * 0.6931471805599453)
+    }
+
+    /// The natural logarithm.
+    pub fn ln(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.ln(), 1.0 / x)
+    }
+
+    /// `ln(1 + x)`, accurate near 0.
+    pub fn ln_1p(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.ln_1p(), 1.0 / (1.0 + x))
+    }
+
+    /// `log2 x`.
+    pub fn log2(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.log2(), 1.0 / (x * 0.6931471805599453))
+    }
+
+    /// `log10 x`.
+    pub fn log10(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.log10(), 1.0 / (x * 2.302585092994046))
+    }
+
+    /// The sine.
+    pub fn sin(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.sin(), x.cos())
+    }
+
+    /// The cosine.
+    pub fn cos(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.cos(), -x.sin())
+    }
+
+    /// The tangent.
+    pub fn tan(self) -> Duals<N> {
+        let x = self.re;
+        let t = x.tan();
+        self.chain(t, 1.0 + t * t)
+    }
+
+    /// The arcsine.
+    pub fn asin(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.asin(), 1.0 / (1.0 - x * x).sqrt())
+    }
+
+    /// The arccosine.
+    pub fn acos(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.acos(), -1.0 / (1.0 - x * x).sqrt())
+    }
+
+    /// The arctangent.
+    pub fn atan(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.atan(), 1.0 / (1.0 + x * x))
+    }
+
+    /// The hyperbolic sine.
+    pub fn sinh(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.sinh(), x.cosh())
+    }
+
+    /// The hyperbolic cosine.
+    pub fn cosh(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.cosh(), x.sinh())
+    }
+
+    /// The hyperbolic tangent.
+    pub fn tanh(self) -> Duals<N> {
+        let x = self.re;
+        let t = x.tanh();
+        self.chain(t, 1.0 - t * t)
+    }
+
+    /// The inverse hyperbolic sine.
+    pub fn asinh(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.asinh(), 1.0 / (x * x + 1.0).sqrt())
+    }
+
+    /// The inverse hyperbolic cosine (`x >= 1`).
+    pub fn acosh(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.acosh(), 1.0 / ((x - 1.0).sqrt() * (x + 1.0).sqrt()))
+    }
+
+    /// The inverse hyperbolic tangent (`|x| < 1`).
+    pub fn atanh(self) -> Duals<N> {
+        let x = self.re;
+        self.chain(x.atanh(), 1.0 / (1.0 - x * x))
+    }
+
+    /// `1 / x`.
+    pub fn recip(self) -> Duals<N> {
+        let x = self.re;
+        let r = 1.0 / x;
+        self.chain(r, -r * r)
+    }
+
+    /// `1 / (1 + e^-x)`, the logistic function.
+    pub fn sigmoid(self) -> Duals<N> {
+        let x = self.re;
+        let s = pkg::dual::logistic(x);
+        self.chain(s, s * (1.0 - s))
+    }
+
+    /// `|x|`; at 0 the derivative taken is 0.
+    pub fn abs(self) -> Duals<N> { if self.re > 0.0 { self } else if self.re < 0.0 { -self } else { Duals::constant(0.0) } }
+
+    /// `x^n` for an integer `n`.
+    pub fn powi(self, n: i32) -> Duals<N> {
+        if n == 0 { return Duals::constant(1.0); }
+        self.chain(self.re.powi(n), (n as f64) * self.re.powi(n - 1))
+    }
+
+    /// `x^p` for a real `p`.
+    pub fn powf(self, p: f64) -> Duals<N> {
+        if p == 0.0 { return Duals::constant(1.0); }
+        self.chain(self.re.pow(p), p * self.re.pow(p - 1.0))
+    }
+
+    /// `x^y`, `exp(y ln x)`.
+    pub fn pow(self, y: Duals<N>) -> Duals<N> { (y * self.ln()).exp() }
+
+    /// `sqrt(x^2 + y^2)` without overflow.
+    pub fn hypot(self, y: Duals<N>) -> Duals<N> {
+        let h = self.re.hypot(y.re);
+        if h == 0.0 { return Duals::constant(0.0); }
+        let o = self.du;
+        for i in 0..N { o[i] = (self.re * self.du[i] + y.re * y.du[i]) / h; }
+        Duals { re: h, du: o }
+    }
+
+    /// `atan2(self, x)`.
+    pub fn atan2(self, x: Duals<N>) -> Duals<N> {
+        let r2 = x.re * x.re + self.re * self.re;
+        let o = self.du;
+        for i in 0..N { o[i] = (x.re * self.du[i] - self.re * x.du[i]) / r2; }
+        Duals { re: self.re.atan2(x.re), du: o }
+    }
+
+    /// The larger by value.
+    pub fn max(self, o: Duals<N>) -> Duals<N> { if o.re > self.re { o } else { self } }
+
+    /// The smaller by value.
+    pub fn min(self, o: Duals<N>) -> Duals<N> { if o.re < self.re { o } else { self } }
+
+    /// Whether every part is finite.
+    pub fn is_finite(self) -> bool {
+        if !self.re.is_finite() { return false; }
+        for i in 0..N {
+            if !self.du[i].is_finite() { return false; }
+        }
+        true
+    }
+}
+
+/// `x` as lanes seeded for the variables `k0 .. k0 + N`: element `k0 + j`
+/// gets derivative part `j`.
+pub(pkg) fn seed_lanes<const N: usize>(x: Vector<f64>, k0: usize) -> Vector<Duals<N>> {
+    let n = x.len();
+    let xs: List<Duals<N>> = List::with_capacity(n);
+    for i in 0..n { xs.push(Duals::var(x[i], if i >= k0 { i - k0 } else { N })); }
+    Array::view_list(xs, [n])
+}
+
+impl<const N: usize> Display for Duals<N> {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.re}+{self.du:?}ε") }
+}
+
+impl<const N: usize> Default for Duals<N> {
+    fn default() -> Duals<N> { Duals::constant(0.0) }
+}
+
+impl<const N: usize> num::Zero for Duals<N> {
+    fn zero() -> Duals<N> { Duals::constant(0.0) }
+}
+
+impl<const N: usize> num::One for Duals<N> {
+    fn one() -> Duals<N> { Duals::constant(1.0) }
+}
+
+impl<const N: usize> ops::Add for Duals<N> {
+    type Output = Duals<N>;
+    fn add(self, o: Duals<N>) -> Duals<N> {
+        let d = self.du;
+        for i in 0..N { d[i] += o.du[i]; }
+        Duals { re: self.re + o.re, du: d }
+    }
+}
+
+impl<const N: usize> ops::Sub for Duals<N> {
+    type Output = Duals<N>;
+    fn sub(self, o: Duals<N>) -> Duals<N> {
+        let d = self.du;
+        for i in 0..N { d[i] -= o.du[i]; }
+        Duals { re: self.re - o.re, du: d }
+    }
+}
+
+impl<const N: usize> ops::Mul for Duals<N> {
+    type Output = Duals<N>;
+    fn mul(self, o: Duals<N>) -> Duals<N> {
+        let d = self.du;
+        for i in 0..N { d[i] = self.du[i] * o.re + self.re * o.du[i]; }
+        Duals { re: self.re * o.re, du: d }
+    }
+}
+
+impl<const N: usize> ops::Div for Duals<N> {
+    type Output = Duals<N>;
+    fn div(self, o: Duals<N>) -> Duals<N> {
+        let q = self.re / o.re;
+        let d = self.du;
+        for i in 0..N { d[i] = (self.du[i] - q * o.du[i]) / o.re; }
+        Duals { re: q, du: d }
+    }
+}
+
+impl<const N: usize> ops::Neg for Duals<N> {
+    type Output = Duals<N>;
+    fn neg(self) -> Duals<N> { self.chain(-self.re, -1.0) }
+}
+
+impl<const N: usize> ops::Add<f64> for Duals<N> {
+    type Output = Duals<N>;
+    fn add(self, o: f64) -> Duals<N> { Duals { re: self.re + o, du: self.du } }
+}
+
+impl<const N: usize> ops::Sub<f64> for Duals<N> {
+    type Output = Duals<N>;
+    fn sub(self, o: f64) -> Duals<N> { Duals { re: self.re - o, du: self.du } }
+}
+
+impl<const N: usize> ops::Mul<f64> for Duals<N> {
+    type Output = Duals<N>;
+    fn mul(self, o: f64) -> Duals<N> { self.chain(self.re * o, o) }
+}
+
+impl<const N: usize> ops::Div<f64> for Duals<N> {
+    type Output = Duals<N>;
+    fn div(self, o: f64) -> Duals<N> { self.chain(self.re / o, 1.0 / o) }
+}
+
+impl<const N: usize> ops::Add<Duals<N>> for f64 {
+    type Output = Duals<N>;
+    fn add(self, o: Duals<N>) -> Duals<N> { Duals { re: self + o.re, du: o.du } }
+}
+
+impl<const N: usize> ops::Sub<Duals<N>> for f64 {
+    type Output = Duals<N>;
+    fn sub(self, o: Duals<N>) -> Duals<N> { o.chain(self - o.re, -1.0) }
+}
+
+impl<const N: usize> ops::Mul<Duals<N>> for f64 {
+    type Output = Duals<N>;
+    fn mul(self, o: Duals<N>) -> Duals<N> { o.chain(self * o.re, self) }
+}
+
+impl<const N: usize> ops::Div<Duals<N>> for f64 {
+    type Output = Duals<N>;
+    fn div(self, o: Duals<N>) -> Duals<N> {
+        let q = self / o.re;
+        o.chain(q, -q / o.re)
+    }
+}
+
+impl<const N: usize> ops::AddAssign for Duals<N> {
+    fn add_assign(ref self, o: Duals<N>) { self = self + o; }
+}
+
+impl<const N: usize> ops::SubAssign for Duals<N> {
+    fn sub_assign(ref self, o: Duals<N>) { self = self - o; }
+}
+
+impl<const N: usize> ops::MulAssign for Duals<N> {
+    fn mul_assign(ref self, o: Duals<N>) { self = self * o; }
+}
+
+impl<const N: usize> ops::DivAssign for Duals<N> {
+    fn div_assign(ref self, o: Duals<N>) { self = self / o; }
+}
+
+impl<const N: usize> ops::Pow<i32> for Duals<N> {
+    type Output = Duals<N>;
+    fn pow(self, n: i32) -> Duals<N> { self.powi(n) }
+}
+
+impl<const N: usize> ops::Pow<f64> for Duals<N> {
+    type Output = Duals<N>;
+    fn pow(self, p: f64) -> Duals<N> { self.powf(p) }
+}
+
+impl<const N: usize> ops::Sqrt for Duals<N> {
+    type Output = Duals<N>;
+    fn sqrt(self) -> Duals<N> { Duals::sqrt(self) }
+}
+
+impl<const N: usize> PartialOrd for Duals<N> {
+    fn lt(self, o: Duals<N>) -> bool { self.re < o.re }
+    fn le(self, o: Duals<N>) -> bool { self.re <= o.re }
+    fn gt(self, o: Duals<N>) -> bool { self.re > o.re }
+    fn ge(self, o: Duals<N>) -> bool { self.re >= o.re }
+}

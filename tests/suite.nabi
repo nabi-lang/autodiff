@@ -1,0 +1,54 @@
+// Tests: every elementary function against its closed-form derivative
+// in each mode, the modes against each other on seeded random points,
+// Hessians and Taylor coefficients against closed forms, edge cases and
+// the notation.
+
+mod forward;
+mod higher;
+mod modes;
+#[cfg(feature = "ops")]
+mod ops;
+mod tape;
+
+use pkg::Smooth;
+use core::array::{Array, Vector};
+use std::random::{Rng, Xoshiro256PlusPlus};
+
+/// `n` uniform values in [lo, hi).
+pub fn rand(n: usize, lo: f64, hi: f64, seed: u64) -> Vector<f64> {
+    let g = Xoshiro256PlusPlus::seed(seed);
+    let xs: List<f64> = List::with_capacity(n);
+    for _ in 0..n { xs.push(g.uniform(lo, hi)); }
+    Array::view_list(xs, [n])
+}
+
+/// Rosenbrock's function in `n` variables, generic over the number type.
+pub fn rosen<T: Smooth>(x: Vector<T>) -> T {
+    let s = T::of(0.0);
+    for i in 0..x.len() - 1 {
+        let a = x[i + 1].clone() - x[i].clone() * x[i].clone();
+        let b = T::of(1.0) - x[i].clone();
+        s = s + a.clone() * a * 100.0 + b.clone() * b;
+    }
+    s
+}
+
+/// Its gradient by hand.
+pub fn rosen_grad(x: Vector<f64>) -> Vector<f64> {
+    let n = x.len();
+    let g: Vector<f64> = Array::zeros([n]);
+    for i in 0..n - 1 {
+        let a = x[i + 1] - x[i] * x[i];
+        g[i] += -400.0 * a * x[i] - 2.0 * (1.0 - x[i]);
+        g[i + 1] += 200.0 * a;
+    }
+    g
+}
+
+/// A smooth function using most of the elementary set.
+pub fn mix<T: Smooth>(x: Vector<T>) -> T {
+    let a = x[0].clone().sin() * x[1].clone().exp() + (x[2].clone() * x[2].clone() + 1.0).ln();
+    let b = x[1].clone().atan() / (x[0].clone().cosh() + 2.0) + x[2].clone().tanh().powi(3);
+    let c = (x[0].clone() * x[0].clone() + 4.0).sqrt().powf(1.5) - x[1].clone().tan() * 0.1;
+    a + b + c + x[2].clone().sinh() * x[0].clone().cos()
+}
