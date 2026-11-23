@@ -114,7 +114,7 @@ inputs.
 
 ## Docs
 
-https://packages.nabi-lang.org/packages/autodiff/latest/docs
+https://docs.nabi-lang.org/packages/autodiff/latest
 
 ## License
 
